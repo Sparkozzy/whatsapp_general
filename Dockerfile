@@ -27,5 +27,6 @@ COPY . .
 
 EXPOSE 8000
 
-# Default command (can be overridden in docker-compose)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Use shell form to allow environment variable expansion for PORT
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
+
