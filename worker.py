@@ -270,9 +270,9 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
 
 # Startup / Shutdown Hooks
 async def startup(ctx):
-    openai_key = os.getenv("OPENAI_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY") or os.getenv("Openai_api_key")
     if not openai_key:
-        raise ValueError("OPENAI_API_KEY must be set in the environment")
+        raise ValueError("OPENAI_API_KEY (or Openai_api_key) must be set in the environment")
     ctx["openai"] = AsyncOpenAI(api_key=openai_key)
 
 async def shutdown(ctx):

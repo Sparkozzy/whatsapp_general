@@ -6,11 +6,11 @@ from typing import Dict
 # Load environment variables
 load_dotenv()
 
-MASTER_SUPABASE_URL = os.getenv("MASTER_SUPABASE_URL")
-MASTER_SUPABASE_SERVICE_KEY = os.getenv("MASTER_SUPABASE_SERVICE_KEY")
+MASTER_SUPABASE_URL = os.getenv("MASTER_SUPABASE_URL") or os.getenv("SUPABASE_URL")
+MASTER_SUPABASE_SERVICE_KEY = os.getenv("MASTER_SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
 
 if not MASTER_SUPABASE_URL or not MASTER_SUPABASE_SERVICE_KEY:
-    raise ValueError("MASTER_SUPABASE_URL and MASTER_SUPABASE_SERVICE_KEY must be set in .env")
+    raise ValueError("MASTER_SUPABASE_URL (or SUPABASE_URL) and MASTER_SUPABASE_SERVICE_KEY (or SUPABASE_KEY) must be set in the environment")
 
 # Singleton Master Supabase Client
 master_supabase: Client = create_client(MASTER_SUPABASE_URL, MASTER_SUPABASE_SERVICE_KEY)
