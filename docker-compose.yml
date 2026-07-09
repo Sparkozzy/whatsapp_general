@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: whatsapp_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: always
+
+  api:
+    build: .
+    container_name: whatsapp_api
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MASTER_SUPABASE_URL=${MASTER_SUPABASE_URL}
+      - MASTER_SUPABASE_SERVICE_KEY=${MASTER_SUPABASE_SERVICE_KEY}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SUPABASE_ACCESS_TOKEN=${SUPABASE_ACCESS_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - Openai_api_key=${Openai_api_key}
+      - Github_token=${Github_token}
+    depends_on:
+      - redis
+    restart: always
+
+  worker:
+    build: .
+    container_name: whatsapp_worker
+    command: arq worker.WorkerSettings
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MASTER_SUPABASE_URL=${MASTER_SUPABASE_URL}
+      - MASTER_SUPABASE_SERVICE_KEY=${MASTER_SUPABASE_SERVICE_KEY}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SUPABASE_ACCESS_TOKEN=${SUPABASE_ACCESS_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - Openai_api_key=${Openai_api_key}
+      - Github_token=${Github_token}
+    depends_on:
+      - redis
+    restart: always
+
+volumes:
+  redis_data:
