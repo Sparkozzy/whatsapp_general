@@ -58,6 +58,31 @@ def test_unauthorized_access(mock_client_config):
     response = client.post("/webhook/whatsapp/zapi/cliente-teste", json={}, headers=headers)
     assert response.status_code == 401
 
+    # Invalid token query param
+    response = client.post("/webhook/whatsapp/zapi/cliente-teste?token=invalid-token", json={})
+    assert response.status_code == 401
+
+@patch("main.redis_client", new_callable=AsyncMock)
+@patch("main.arq_pool", new_callable=AsyncMock)
+def test_query_token_success(mock_arq, mock_redis, mock_client_config, mock_supabase_client):
+    mock_redis.lrange.side_effect = [
+        ["Olá"],
+        ["Olá"]
+    ]
+    payload = {
+        "type": "TEXT",
+        "text": "Olá",
+        "direction": "FROM_HUB",
+        "details": {
+            "to": "+5551996506656",
+            "from": "+5548996027108"
+        }
+    }
+    response = client.post("/webhook/whatsapp/crm/cliente-teste?token=valid-mindflow-token", json=payload)
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+
+
 @patch("main.redis_client", new_callable=AsyncMock)
 @patch("main.arq_pool", new_callable=AsyncMock)
 def test_zapi_webhook_success(mock_arq, mock_redis, mock_client_config, mock_supabase_client):
@@ -109,9 +134,13 @@ def test_crm_webhook_success(mock_arq, mock_redis, mock_client_config, mock_supa
 
     headers = {"X-MindFlow-Token": "valid-mindflow-token"}
     payload = {
-        "phone": "5548996027108",
-        "message": "Olá",
-        "type": "TEXT"
+        "type": "TEXT",
+        "text": "Olá",
+        "direction": "FROM_HUB",
+        "details": {
+            "to": "+5551996506656",
+            "from": "+5548996027108"
+        }
     }
 
     response = client.post("/webhook/whatsapp/crm/cliente-teste", json=payload, headers=headers)
@@ -122,3 +151,22 @@ def test_crm_webhook_success(mock_arq, mock_redis, mock_client_config, mock_supa
     
     # Ensure it didn't trigger enqueue as it's not the winning thread
     mock_arq.enqueue_job.assert_not_called()
+
+@patch("main.redis_client", new_callable=AsyncMock)
+@patch("main.arq_pool", new_callable=AsyncMock)
+def test_crm_webhook_ignored_direction(mock_arq, mock_redis, mock_client_config, mock_supabase_client):
+    headers = {"X-MindFlow-Token": "valid-mindflow-token"}
+    payload = {
+        "type": "TEXT",
+        "text": "Olá",
+        "direction": "TO_HUB",
+        "details": {
+            "to": "+5548996027108",
+            "from": "+5551996506656"
+        }
+    }
+
+    response = client.post("/webhook/whatsapp/crm/cliente-teste", json=payload, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+

@@ -22,11 +22,24 @@ class ZApiWebhookPayload(BaseModel):
     content: ZApiContent
 
 # CRM Webhook Schema
+class CrmFile(BaseModel):
+    url: Optional[str] = None
+    publicUrl: Optional[str] = None
+
+class CrmDetails(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    
+    to: str
+    sender_from: str = Field(alias="from")
+    file: Optional[CrmFile] = None
+
 class CrmWebhookPayload(BaseModel):
-    phone: str
-    message: Optional[str] = None
-    audio_url: Optional[str] = None
-    type: str = "TEXT"  # TEXT, AUDIO, etc.
+    model_config = ConfigDict(populate_by_name=True)
+    
+    type: str  # TEXT, AUDIO, etc.
+    text: Optional[str] = None
+    direction: str  # FROM_HUB, TO_HUB
+    details: CrmDetails
 
 # Internal Normalized Schema
 class NormalizedMessage(BaseModel):

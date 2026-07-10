@@ -2,7 +2,7 @@ import os
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, Header, status
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, status
 from arq import create_pool
 from arq.connections import RedisSettings
 import redis.asyncio as aioredis
@@ -33,14 +33,17 @@ app = FastAPI(title="MindFlow WhatsApp Multi-tenant API", lifespan=lifespan)
 async def verify_mindflow_token(
     client_id: str,
     x_mindflow_token: Optional[str] = Header(None, alias="X-MindFlow-Token"),
-    authorization: Optional[str] = Header(None)
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None)
 ):
-    # Try to extract bearer token if X-MindFlow-Token header is missing
-    token = x_mindflow_token
-    if not token and authorization and authorization.startswith("Bearer "):
-        token = authorization.split(" ")[1]
+    # Try to extract bearer token or query parameter if X-MindFlow-Token header is missing
+    actual_token = x_mindflow_token
+    if not actual_token and authorization and authorization.startswith("Bearer "):
+        actual_token = authorization.split(" ")[1]
+    if not actual_token and token:
+        actual_token = token
 
-    if not token:
+    if not actual_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="MindFlow security token is missing."
@@ -55,7 +58,7 @@ async def verify_mindflow_token(
         )
 
     expected_token = config.get("mindflow_api_token")
-    if not expected_token or token != expected_token:
+    if not expected_token or actual_token != expected_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid security token."
@@ -179,15 +182,19 @@ async def crm_webhook(
     payload: CrmWebhookPayload,
     _ = Depends(verify_mindflow_token)
 ):
+    if payload.direction != "FROM_HUB":
+        return {"status": "ignored", "reason": "Not an inbound message (direction is not FROM_HUB)."}
+
     content_type = payload.type.upper()
-    phone = sanitize_phone(payload.phone)
+    phone = sanitize_phone(payload.details.sender_from)
 
     text = ""
     audio_url = None
     if content_type == "TEXT":
-        text = payload.message or ""
+        text = payload.text or ""
     elif content_type == "AUDIO":
-        audio_url = payload.audio_url
+        if payload.details.file:
+            audio_url = payload.details.file.url or payload.details.file.publicUrl
         text = "[Mensagem de Áudio]"
     else:
         raise HTTPException(

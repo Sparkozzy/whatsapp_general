@@ -4,9 +4,10 @@ Esta documentação descreve os endpoints expostos pelo serviço **MindFlow What
 
 ## Informações Gerais
 * **Base URL**: `https://whatsapp-general-github.bkpxmb.easypanel.host`
-* **Autenticação**: Requerida para todos os endpoints de webhook. Pode ser fornecida de duas formas:
+* **Autenticação**: Requerida para todos os endpoints de webhook. Pode ser fornecida de três formas:
   * Via Header personalizado: `X-MindFlow-Token: <token>`
   * Via Header de autorização padrão: `Authorization: Bearer <token>`
+  * Via Query Parameter na URL: `?token=<token>` (Útil para CRMs que não suportam configuração de headers customizados)
   
 > [!NOTE]
 > O `<token>` é validado dinamicamente no banco de dados Master a partir da tabela `client_configurations` usando o campo `mindflow_api_token` para o `client_id` fornecido na rota.
@@ -105,18 +106,28 @@ Content-Type: application/json
 ##### Exemplo de Mensagem de Texto (CRM):
 ```json
 {
-  "phone": "5548996027108",
   "type": "TEXT",
-  "message": "Mensagem enviada do CRM."
+  "text": "Oi",
+  "direction": "FROM_HUB",
+  "details": {
+    "to": "+5551996506656",
+    "from": "+5548996027108"
+  }
 }
 ```
 
 ##### Exemplo de Mensagem de Áudio (CRM):
 ```json
 {
-  "phone": "5548996027108",
   "type": "AUDIO",
-  "audio_url": "https://meucrm.com/storage/audio.mp3"
+  "direction": "FROM_HUB",
+  "details": {
+    "to": "+5551996506656",
+    "from": "+5548996027108",
+    "file": {
+      "url": "https://meucrm.com/storage/audio.mp3"
+    }
+  }
 }
 ```
 
