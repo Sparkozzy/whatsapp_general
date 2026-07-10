@@ -36,10 +36,11 @@ class CrmDetails(BaseModel):
 class CrmWebhookPayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     
-    type: str  # TEXT, AUDIO, etc.
+    type: str = "TEXT"  # TEXT, AUDIO, etc.
     text: Optional[str] = None
     direction: str  # FROM_HUB, TO_HUB
     details: CrmDetails
+
 
 # Internal Normalized Schema
 class NormalizedMessage(BaseModel):
