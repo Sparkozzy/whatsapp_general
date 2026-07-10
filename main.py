@@ -2,7 +2,9 @@ import os
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, Header, Query, status
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from arq import create_pool
 from arq.connections import RedisSettings
 import redis.asyncio as aioredis
@@ -28,6 +30,17 @@ async def lifespan(app: FastAPI):
         await arq_pool.close()
 
 app = FastAPI(title="MindFlow WhatsApp Multi-tenant API", lifespan=lifespan)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    body = await request.body()
+    print("--- Request Validation Error ---")
+    print(f"Errors: {exc.errors()}")
+    print(f"Body: {body.decode('utf-8', errors='ignore')}")
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": exc.errors(), "body": body.decode('utf-8', errors='ignore')}
+    )
 
 # Token security dependency
 async def verify_mindflow_token(
