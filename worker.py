@@ -66,7 +66,8 @@ async def run_step_with_retry(
                 raise e
             
             # Exponential backoff + jitter
-            await asyncio.sleep(delay + (asyncio.subprocess.sys.float_info.min or 0.1))
+            import sys
+            await asyncio.sleep(delay + (sys.float_info.min or 0.1))
             delay *= 2
             attempt += 1
 
@@ -171,6 +172,10 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
                     msg = row.get("message") or {}
                     msg_type = msg.get("type")
                     content = msg.get("content", "")
+                    if isinstance(content, dict):
+                        content = content.get("output") or content.get("text") or str(content)
+                    elif not isinstance(content, str):
+                        content = str(content)
                     role = "user" if msg_type == "human" else "assistant"
                     history.append({"role": role, "content": content})
             except Exception:
