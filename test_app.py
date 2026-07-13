@@ -70,12 +70,15 @@ def test_query_token_success(mock_arq, mock_redis, mock_client_config, mock_supa
         ["Olá"]
     ]
     payload = {
-        "type": "TEXT",
-        "text": "Olá",
-        "direction": "FROM_HUB",
-        "details": {
-            "to": "+5551996506656",
-            "from": "+5548996027108"
+        "eventType": "MESSAGE_RECEIVED",
+        "content": {
+            "type": "TEXT",
+            "text": "Olá",
+            "direction": "FROM_HUB",
+            "details": {
+                "to": "+5551996506656",
+                "from": "+5548996027108"
+            }
         }
     }
     response = client.post("/webhook/whatsapp/crm/cliente-teste?token=valid-mindflow-token", json=payload)
@@ -134,12 +137,15 @@ def test_crm_webhook_success(mock_arq, mock_redis, mock_client_config, mock_supa
 
     headers = {"X-MindFlow-Token": "valid-mindflow-token"}
     payload = {
-        "type": "TEXT",
-        "text": "Olá",
-        "direction": "FROM_HUB",
-        "details": {
-            "to": "+5551996506656",
-            "from": "+5548996027108"
+        "eventType": "MESSAGE_RECEIVED",
+        "content": {
+            "type": "TEXT",
+            "text": "Olá",
+            "direction": "FROM_HUB",
+            "details": {
+                "to": "+5551996506656",
+                "from": "+5548996027108"
+            }
         }
     }
 
@@ -157,12 +163,15 @@ def test_crm_webhook_success(mock_arq, mock_redis, mock_client_config, mock_supa
 def test_crm_webhook_ignored_direction(mock_arq, mock_redis, mock_client_config, mock_supabase_client):
     headers = {"X-MindFlow-Token": "valid-mindflow-token"}
     payload = {
-        "type": "TEXT",
-        "text": "Olá",
-        "direction": "TO_HUB",
-        "details": {
-            "to": "+5548996027108",
-            "from": "+5551996506656"
+        "eventType": "MESSAGE_RECEIVED",
+        "content": {
+            "type": "TEXT",
+            "text": "Olá",
+            "direction": "TO_HUB",
+            "details": {
+                "to": "+5548996027108",
+                "from": "+5551996506656"
+            }
         }
     }
 

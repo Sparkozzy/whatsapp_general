@@ -1,6 +1,7 @@
 import os
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Header, Query, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -37,6 +38,28 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     print("--- Request Validation Error ---")
     print(f"Errors: {exc.errors()}")
     print(f"Body: {body.decode('utf-8', errors='ignore')}")
+    
+    # Track the error in Supabase if client_id is available
+    client_id = request.path_params.get("client_id")
+    if client_id:
+        try:
+            import json
+            try:
+                body_json = json.loads(body)
+            except Exception:
+                body_json = {"raw_body": body.decode('utf-8', errors='ignore')}
+            
+            tenant_supabase = ClientDatabaseManager.get_client(client_id)
+            tenant_supabase.table("workflow_executions").insert({
+                "workflow_name": "whatsapp_flow",
+                "status": "FAILED",
+                "input_data": body_json,
+                "error_details": f"Validation Error: {exc.errors()}",
+                "completed_at": datetime.now(timezone.utc).isoformat()
+            }).execute()
+        except Exception as db_err:
+            print(f"Failed to log validation error to Supabase: {db_err}")
+
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"detail": exc.errors(), "body": body.decode('utf-8', errors='ignore')}
@@ -195,19 +218,20 @@ async def crm_webhook(
     payload: CrmWebhookPayload,
     _ = Depends(verify_mindflow_token)
 ):
-    if payload.direction != "FROM_HUB":
+    content = payload.content
+    if content.direction != "FROM_HUB":
         return {"status": "ignored", "reason": "Not an inbound message (direction is not FROM_HUB)."}
 
-    content_type = payload.type.upper()
-    phone = sanitize_phone(payload.details.sender_from)
+    content_type = content.type.upper()
+    phone = sanitize_phone(content.details.sender_from)
 
     text = ""
     audio_url = None
     if content_type == "TEXT":
-        text = payload.text or ""
+        text = content.text or ""
     elif content_type == "AUDIO":
-        if payload.details.file:
-            audio_url = payload.details.file.url or payload.details.file.publicUrl
+        if content.details.file:
+            audio_url = content.details.file.url or content.details.file.publicUrl
         text = "[Mensagem de Áudio]"
     else:
         raise HTTPException(

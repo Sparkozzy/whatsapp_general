@@ -33,13 +33,17 @@ class CrmDetails(BaseModel):
     sender_from: str = Field(alias="from")
     file: Optional[CrmFile] = None
 
-class CrmWebhookPayload(BaseModel):
+class CrmContent(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     
     type: str = "TEXT"  # TEXT, AUDIO, etc.
     text: Optional[str] = None
     direction: str  # FROM_HUB, TO_HUB
     details: CrmDetails
+
+class CrmWebhookPayload(BaseModel):
+    eventType: str
+    content: CrmContent
 
 
 # Internal Normalized Schema
