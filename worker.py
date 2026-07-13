@@ -159,13 +159,20 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
             # Query n8n_chat_histories table inside client's DB
             try:
                 res = tenant_supabase.table("n8n_chat_histories")\
-                    .select("role, content")\
+                    .select("message, id")\
                     .eq("session_id", phone)\
-                    .order("created_at", desc=True)\
+                    .order("id", desc=True)\
                     .limit(10)\
                     .execute()
                 # Reverse to get chronological order
-                history = list(reversed(res.data))
+                raw_history = list(reversed(res.data))
+                history = []
+                for row in raw_history:
+                    msg = row.get("message") or {}
+                    msg_type = msg.get("type")
+                    content = msg.get("content", "")
+                    role = "user" if msg_type == "human" else "assistant"
+                    history.append({"role": role, "content": content})
             except Exception:
                 # If table does not exist or fails, return empty list
                 history = []
@@ -235,15 +242,23 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
                 # Add user message
                 tenant_supabase.table("n8n_chat_histories").insert({
                     "session_id": phone,
-                    "role": "user",
-                    "content": aggregated_text,
+                    "message": {
+                        "type": "human",
+                        "content": aggregated_text,
+                        "additional_kwargs": {},
+                        "response_metadata": {}
+                    },
                     "created_at": datetime.now(timezone.utc).isoformat()
                 }).execute()
                 # Add assistant response
                 tenant_supabase.table("n8n_chat_histories").insert({
                     "session_id": phone,
-                    "role": "assistant",
-                    "content": output_text,
+                    "message": {
+                        "type": "ai",
+                        "content": output_text,
+                        "additional_kwargs": {},
+                        "response_metadata": {}
+                    },
                     "created_at": datetime.now(timezone.utc).isoformat()
                 }).execute()
             except Exception as e:
