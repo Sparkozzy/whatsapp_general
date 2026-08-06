@@ -104,7 +104,7 @@ async def generate_tts_audio(openai_client, text: str) -> str:
     Generates speech audio from text using OpenAI TTS, returning base64 encoding.
     """
     response = await openai_client.audio.speech.create(
-        model="tts-1-hd",
+        model="tts-1",
         voice="nova",
         input=text
     )
