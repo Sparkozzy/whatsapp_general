@@ -6,7 +6,7 @@ from openai import AsyncOpenAI
 from arq import cron
 from arq.connections import RedisSettings
 
-from database import ClientDatabaseManager
+from database import ClientDatabaseManager, master_supabase
 from services.whatsapp import send_text, send_audio
 from services.agent import generate_llm_response, format_text_response, generate_tts_audio
 
@@ -149,7 +149,7 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
         async def fetch_prompt():
             if not prompt_id:
                 raise ValueError("prompt_id not configured for this client.")
-            res = tenant_supabase.table("Prompts").select("Prompt_Text").eq("id", prompt_id).single().execute()
+            res = master_supabase.table("Prompts").select("Prompt_Text").eq("id", prompt_id).single().execute()
             return {"prompt": res.data["Prompt_Text"]}
             
         prompt_res = await run_step_with_retry("whatsapp_flow_fetch_prompt", execution_id, tenant_supabase, fetch_prompt, {"prompt_id": prompt_id})
