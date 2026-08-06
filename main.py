@@ -14,21 +14,30 @@ from database import ClientDatabaseManager
 from schemas import ZApiWebhookPayload, CrmWebhookPayload, NormalizedMessage
 from services.whatsapp import transcribe_audio
 
-# Global Redis clients
+# Global Redis and OpenAI clients
 redis_client = None
 arq_pool = None
+openai_client = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global redis_client, arq_pool
+    global redis_client, arq_pool, openai_client
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     redis_client = aioredis.from_url(redis_url)
     arq_pool = await create_pool(RedisSettings.from_dsn(redis_url))
+    
+    openai_key = os.getenv("OPENAI_API_KEY") or os.getenv("Openai_api_key")
+    if openai_key:
+        from openai import AsyncOpenAI
+        openai_client = AsyncOpenAI(api_key=openai_key)
+        
     yield
     if redis_client:
         await redis_client.close()
     if arq_pool:
         await arq_pool.close()
+    if openai_client:
+        await openai_client.close()
 
 app = FastAPI(title="MindFlow WhatsApp Multi-tenant API", lifespan=lifespan)
 
@@ -191,8 +200,11 @@ async def zapi_webhook(
         # Extract audio URL
         if payload.content.details.file:
             audio_url = payload.content.details.file.publicUrl
-            # We don't transcribe here as it's blocking; we store the URL or pass it
-            text = "[Mensagem de Áudio]"
+            try:
+                text = await transcribe_audio(audio_url, openai_client)
+            except Exception as e:
+                print(f"Failed to transcribe audio: {e}")
+                text = "[Mensagem de Áudio]"
     else:
         # Ignore or error other medias
         raise HTTPException(
@@ -232,7 +244,11 @@ async def crm_webhook(
     elif content_type == "AUDIO":
         if content.details.file:
             audio_url = content.details.file.url or content.details.file.publicUrl
-        text = "[Mensagem de Áudio]"
+        try:
+            text = await transcribe_audio(audio_url, openai_client)
+        except Exception as e:
+            print(f"Failed to transcribe audio: {e}")
+            text = "[Mensagem de Áudio]"
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
