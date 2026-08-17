@@ -179,3 +179,94 @@ def test_crm_webhook_ignored_direction(mock_arq, mock_redis, mock_client_config,
     assert response.status_code == 200
     assert response.json()["status"] == "ignored"
 
+
+from services.agent import generate_tts_audio
+from worker import process_whatsapp_response
+
+@pytest.mark.asyncio
+async def test_generate_tts_audio_custom_voice():
+    mock_openai = AsyncMock()
+    mock_response = MagicMock()
+    mock_response.content = b"audio-data"
+    mock_openai.audio.speech.create.return_value = mock_response
+
+    res = await generate_tts_audio(mock_openai, "olá", voice="alloy")
+    
+    assert res is not None
+    mock_openai.audio.speech.create.assert_called_once_with(
+        model="tts-1",
+        voice="alloy",
+        input="olá"
+    )
+
+@pytest.mark.asyncio
+@patch("worker.ClientDatabaseManager")
+@patch("worker.master_supabase")
+@patch("worker.generate_llm_response", new_callable=AsyncMock)
+@patch("worker.generate_tts_audio", new_callable=AsyncMock)
+@patch("worker.send_audio", new_callable=AsyncMock)
+@patch("worker.run_step_with_retry", new_callable=AsyncMock)
+async def test_process_whatsapp_response_custom_voice(
+    mock_run_step, mock_send_audio, mock_generate_tts, mock_generate_llm, mock_master_supabase, mock_db_mgr
+):
+    # Mock tenant config returning a custom voice_id
+    mock_db_mgr.get_client_config.return_value = {
+        "client_id": "cliente-teste",
+        "prompt_id": 123,
+        "voice_id": "shimmer"
+    }
+    
+    # Mock tenant supabase client
+    mock_supabase = MagicMock()
+    mock_db_mgr.get_client.return_value = mock_supabase
+    
+    # Mock routing for different tables in tenant DB
+    def mock_table_routing(table_name):
+        table_mock = MagicMock()
+        execute_mock = MagicMock()
+        
+        if table_name == "Blacklist_Mindflow":
+            execute_mock.return_value.data = []  # Not blacklisted
+        elif table_name == "Leads_Mindflow":
+            execute_mock.return_value.data = [{"id": 1, "Número": "+5548996027108"}]
+        else:
+            execute_mock.return_value.data = [{"id": "mock-id"}]
+            
+        table_mock.select.return_value.eq.return_value.execute = execute_mock
+        table_mock.select.return_value.eq.return_value.order.return_value.limit.return_value.execute = execute_mock
+        table_mock.insert.return_value.execute = execute_mock
+        table_mock.update.return_value.eq.return_value.execute = execute_mock
+        return table_mock
+
+    mock_supabase.table.side_effect = mock_table_routing
+
+    # Mock master_supabase for prompt fetching
+    mock_prompt_execute = MagicMock()
+    mock_prompt_execute.data = {"Prompt_Text": "System Prompt"}
+    mock_master_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute = mock_prompt_execute
+    
+    # Mock LLM response to trigger audio generation
+    mock_generate_llm.return_value = {
+        "type": "audio",
+        "output": "Resposta em áudio"
+    }
+    
+    # Mock TTS generation output
+    mock_generate_tts.return_value = "mock-audio-b64"
+    
+    # Mock run_step_with_retry behavior to execute the actual functions
+    async def side_effect_run_step(step_name, execution_id, tenant_db, func, *args, **kwargs):
+        return await func()
+    mock_run_step.side_effect = side_effect_run_step
+
+    ctx = {"openai": AsyncMock()}
+    
+    await process_whatsapp_response(ctx, "cliente-teste", "+5548996027108", "Olá", "mock-exec-123")
+    
+    # Verify that get_client_config was fetched
+    mock_db_mgr.get_client_config.assert_called_once_with("cliente-teste")
+    
+    # Verify generate_tts_audio was called with the custom voice_id "shimmer"
+    mock_generate_tts.assert_called_once_with(ctx["openai"], "Resposta em áudio", voice="shimmer")
+
+
