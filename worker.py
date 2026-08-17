@@ -86,6 +86,7 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
         # Fetch configurations
         config = ClientDatabaseManager.get_client_config(client_id)
         prompt_id = config.get("prompt_id")
+        voice_id = config.get("voice_id") or "nova"
         
         # Fetch LLM configurations (defaulting to n8n parameters if not present)
         llm_model = config.get("llm_model") or "gpt-4"
@@ -208,7 +209,7 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
         if response_type == "audio":
             # Generate Audio
             async def generate_audio():
-                audio_b64 = await generate_tts_audio(openai_client, output_text)
+                audio_b64 = await generate_tts_audio(openai_client, output_text, voice=voice_id)
                 return {"audio_b64_len": len(audio_b64), "audio_b64": audio_b64}
                 
             audio_res = await run_step_with_retry("whatsapp_flow_tts_generation", execution_id, tenant_supabase, generate_audio, {"text": output_text})

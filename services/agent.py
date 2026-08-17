@@ -99,13 +99,13 @@ async def format_text_response(openai_client, text_to_format: str) -> List[str]:
         # Fallback to single text if JSON fails
         return [text_to_format]
 
-async def generate_tts_audio(openai_client, text: str) -> str:
+async def generate_tts_audio(openai_client, text: str, voice: str = "nova") -> str:
     """
     Generates speech audio from text using OpenAI TTS, returning base64 encoding.
     """
     response = await openai_client.audio.speech.create(
         model="tts-1",
-        voice="nova",
+        voice=voice,
         input=text
     )
     # Read binary bytes

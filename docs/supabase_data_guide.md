@@ -58,6 +58,7 @@ Gerencia a configuração global dos clientes cadastrados e credenciais de integ
 | `zapi_security_token` | `text` | ❌ | Token de segurança da Z-API (enviado no header Client-Token). |
 | `zapi_group_id` | `text` | ❌ | ID do grupo do WhatsApp para notificações internas. |
 | `crm_config` | `jsonb` | ❌ | Configurações do CRM (Webhook). Ex: `{ "crm_type": "webhook", "webhook_url": "...", "headers": { "Authorization": "Bearer token" } }`. |
+| `voice_id` | `text` | ❌ | ID da voz usada no OpenAI TTS (ex: `nova`, `alloy`, `echo`, `fable`, `onyx`, `shimmer`). Padrão: `'nova'`. |
 
 ---
 
