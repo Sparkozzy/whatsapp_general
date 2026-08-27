@@ -219,6 +219,22 @@ async def zapi_webhook(
                 text = f"[Imagem: {caption}]" if caption else "[Imagem enviada pelo usuário]"
         else:
             text = f"[Imagem: {caption}]" if caption else "[Imagem enviada pelo usuário]"
+    elif content_type in ["DOCUMENT", "PDF", "FILE", "DOCUMENT_RECEIVED"]:
+        file_url = None
+        file_name = None
+        if payload.content.details.file:
+            file_url = payload.content.details.file.publicUrl or payload.content.details.file.url
+            file_name = payload.content.details.file.fileName or payload.content.details.file.name
+        caption = payload.content.text
+        parts = []
+        if file_name:
+            parts.append(f"Arquivo: {file_name}")
+        if caption and caption.strip():
+            parts.append(f"Legenda enviada com o arquivo: {caption.strip()}")
+        if parts:
+            text = f"[Documento PDF recebido | {' | '.join(parts)}]"
+        else:
+            text = "[Documento PDF recebido pelo usuário]"
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -232,6 +248,7 @@ async def zapi_webhook(
         type=content_type.lower(),
         audio_url=audio_url,
         image_url=image_url,
+        file_url=file_url if content_type in ["DOCUMENT", "PDF", "FILE", "DOCUMENT_RECEIVED"] else None,
         raw_payload=payload.model_dump()
     )
     
@@ -254,6 +271,7 @@ async def crm_webhook(
     text = ""
     audio_url = None
     image_url = None
+    file_url = None
 
     if content_type == "TEXT":
         text = content.text or ""
@@ -277,6 +295,21 @@ async def crm_webhook(
                 text = f"[Imagem: {caption}]" if caption else "[Imagem enviada pelo usuário]"
         else:
             text = f"[Imagem: {caption}]" if caption else "[Imagem enviada pelo usuário]"
+    elif content_type in ["DOCUMENT", "PDF", "FILE", "DOCUMENT_RECEIVED"]:
+        file_name = None
+        if content.details.file:
+            file_url = content.details.file.url or content.details.file.publicUrl
+            file_name = content.details.file.fileName or content.details.file.name
+        caption = content.text
+        parts = []
+        if file_name:
+            parts.append(f"Arquivo: {file_name}")
+        if caption and caption.strip():
+            parts.append(f"Legenda enviada com o arquivo: {caption.strip()}")
+        if parts:
+            text = f"[Documento PDF recebido | {' | '.join(parts)}]"
+        else:
+            text = "[Documento PDF recebido pelo usuário]"
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -290,9 +323,11 @@ async def crm_webhook(
         type=content_type.lower(),
         audio_url=audio_url,
         image_url=image_url,
+        file_url=file_url,
         raw_payload=payload.model_dump()
     )
 
     res = await handle_normalized_message(msg)
     return res
+
 
