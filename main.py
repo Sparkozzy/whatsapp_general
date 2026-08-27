@@ -13,6 +13,7 @@ import redis.asyncio as aioredis
 from database import ClientDatabaseManager
 from schemas import ZApiWebhookPayload, CrmWebhookPayload, NormalizedMessage
 from services.whatsapp import transcribe_audio
+from services.agent import analyze_image
 
 # Global Redis and OpenAI clients
 redis_client = None
@@ -194,19 +195,31 @@ async def zapi_webhook(
     # Extract message or media details
     text = ""
     audio_url = None
+    image_url = None
+
     if content_type == "TEXT":
         text = payload.content.text or ""
     elif content_type == "AUDIO":
-        # Extract audio URL
         if payload.content.details.file:
-            audio_url = payload.content.details.file.publicUrl
+            audio_url = payload.content.details.file.publicUrl or payload.content.details.file.url
             try:
                 text = await transcribe_audio(audio_url, openai_client)
             except Exception as e:
                 print(f"Failed to transcribe audio: {e}")
                 text = "[Mensagem de Áudio]"
+    elif content_type == "IMAGE":
+        if payload.content.details.file:
+            image_url = payload.content.details.file.publicUrl or payload.content.details.file.url
+        caption = payload.content.text
+        if image_url:
+            try:
+                text = await analyze_image(openai_client, image_url, caption=caption)
+            except Exception as e:
+                print(f"Failed to analyze image: {e}")
+                text = f"[Imagem: {caption}]" if caption else "[Imagem enviada pelo usuário]"
+        else:
+            text = f"[Imagem: {caption}]" if caption else "[Imagem enviada pelo usuário]"
     else:
-        # Ignore or error other medias
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported media type: {content_type}"
@@ -216,8 +229,9 @@ async def zapi_webhook(
         client_id=client_id,
         phone=phone,
         text=text,
-        type="audio" if content_type == "AUDIO" else "texto",
+        type=content_type.lower(),
         audio_url=audio_url,
+        image_url=image_url,
         raw_payload=payload.model_dump()
     )
     
@@ -239,6 +253,8 @@ async def crm_webhook(
 
     text = ""
     audio_url = None
+    image_url = None
+
     if content_type == "TEXT":
         text = content.text or ""
     elif content_type == "AUDIO":
@@ -249,6 +265,18 @@ async def crm_webhook(
         except Exception as e:
             print(f"Failed to transcribe audio: {e}")
             text = "[Mensagem de Áudio]"
+    elif content_type == "IMAGE":
+        if content.details.file:
+            image_url = content.details.file.url or content.details.file.publicUrl
+        caption = content.text
+        if image_url:
+            try:
+                text = await analyze_image(openai_client, image_url, caption=caption)
+            except Exception as e:
+                print(f"Failed to analyze image: {e}")
+                text = f"[Imagem: {caption}]" if caption else "[Imagem enviada pelo usuário]"
+        else:
+            text = f"[Imagem: {caption}]" if caption else "[Imagem enviada pelo usuário]"
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -259,10 +287,12 @@ async def crm_webhook(
         client_id=client_id,
         phone=phone,
         text=text,
-        type="audio" if content_type == "AUDIO" else "texto",
+        type=content_type.lower(),
         audio_url=audio_url,
+        image_url=image_url,
         raw_payload=payload.model_dump()
     )
 
     res = await handle_normalized_message(msg)
     return res
+

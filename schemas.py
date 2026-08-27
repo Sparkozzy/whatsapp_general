@@ -3,6 +3,7 @@ from typing import Optional, Dict, Any
 
 # Z-API Webhook Schema
 class ZApiFile(BaseModel):
+    url: Optional[str] = None
     publicUrl: Optional[str] = None
 
 class ZApiDetails(BaseModel):
@@ -36,7 +37,7 @@ class CrmDetails(BaseModel):
 class CrmContent(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     
-    type: str = "TEXT"  # TEXT, AUDIO, etc.
+    type: str = "TEXT"  # TEXT, AUDIO, IMAGE, etc.
     text: Optional[str] = None
     direction: str  # FROM_HUB, TO_HUB
     details: CrmDetails
@@ -51,6 +52,8 @@ class NormalizedMessage(BaseModel):
     client_id: str
     phone: str
     text: str
-    type: str  # texto, audio, etc.
+    type: str  # texto, audio, imagem, etc.
     audio_url: Optional[str] = None
+    image_url: Optional[str] = None
     raw_payload: Dict[str, Any]
+

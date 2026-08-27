@@ -126,6 +126,39 @@ def test_zapi_webhook_success(mock_arq, mock_redis, mock_client_config, mock_sup
         "mock-exec-uuid"
     )
 
+@patch("main.analyze_image", new_callable=AsyncMock)
+@patch("main.redis_client", new_callable=AsyncMock)
+@patch("main.arq_pool", new_callable=AsyncMock)
+def test_zapi_webhook_image_success(mock_arq, mock_redis, mock_analyze_image, mock_client_config, mock_supabase_client):
+    mock_analyze_image.return_value = "[Imagem: Foto do documento de identidade | Legenda enviada com a foto: Segue foto]"
+    mock_redis.lrange.side_effect = [
+        ["[Imagem: Foto do documento de identidade | Legenda enviada com a foto: Segue foto]"],
+        ["[Imagem: Foto do documento de identidade | Legenda enviada com a foto: Segue foto]"]
+    ]
+
+    headers = {"X-MindFlow-Token": "valid-mindflow-token"}
+    payload = {
+        "instanceId": "instance-123",
+        "eventType": "MESSAGE_RECEIVED",
+        "content": {
+            "type": "IMAGE",
+            "text": "Segue foto",
+            "details": {
+                "from": "5548996027108",
+                "file": {
+                    "publicUrl": "https://example.com/image.jpg"
+                }
+            }
+        }
+    }
+
+    response = client.post("/webhook/whatsapp/zapi/cliente-teste", json=payload, headers=headers)
+    assert response.status_code == 200
+    res_json = response.json()
+    assert res_json["status"] == "accepted"
+    mock_analyze_image.assert_called_once()
+
+
 @patch("main.redis_client", new_callable=AsyncMock)
 @patch("main.arq_pool", new_callable=AsyncMock)
 def test_crm_webhook_success(mock_arq, mock_redis, mock_client_config, mock_supabase_client):

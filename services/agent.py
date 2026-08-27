@@ -1,6 +1,7 @@
 import json
 import base64
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
 
 async def generate_llm_response(
     openai_client,
@@ -111,3 +112,47 @@ async def generate_tts_audio(openai_client, text: str, voice: str = "nova") -> s
     # Read binary bytes
     audio_bytes = response.content
     return base64.b64encode(audio_bytes).decode("utf-8")
+
+async def analyze_image(openai_client, image_url: str, caption: Optional[str] = None) -> str:
+    """
+    Analyzes/describes an image using GPT-4o-mini Vision API.
+    Returns a text description (including OCR and visual analysis) to be buffered.
+    """
+    system_message = (
+        "Você é um assistente de IA especializado em visão computacional e transcrição de imagens (OCR).\n"
+        "Sua tarefa é analisar a imagem fornecida e descrever seu conteúdo de forma clara, precisa e objetiva.\n"
+        "Regras:\n"
+        "- Identifique e descreva elementos chave: textos (faça a leitura/OCR completa de documentos ou telas), "
+        "comprovantes de pagamento, valores, datas, nomes, produtos, tabelas ou objetos visuais relevantes.\n"
+        "- Responda apenas com a descrição objetiva do conteúdo da imagem em português.\n"
+        "- Seja direto e conciso, focando no que é importante para o atendimento de um agente comercial/jurídico.\n"
+    )
+
+    messages = [
+        {"role": "system", "content": system_message},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analise a imagem a seguir e descreva detalhadamente todo o seu conteúdo (textos/OCR, dados, comprovantes, objetos):"},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]
+        }
+    ]
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=600,
+            temperature=0.2
+        )
+        description = response.choices[0].message.content or "Imagem recebida (sem descrição legível disponível)."
+    except Exception as e:
+        print(f"Failed to analyze image with vision model: {e}")
+        description = "Imagem enviada pelo usuário (falha ao extrair detalhes visuais)."
+
+    if caption and caption.strip():
+        return f"[Imagem: {description} | Legenda enviada com a foto: {caption.strip()}]"
+    else:
+        return f"[Imagem: {description}]"
+
