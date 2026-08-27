@@ -152,10 +152,12 @@ def test_zapi_webhook_image_success(mock_arq, mock_redis, mock_analyze_image, mo
         }
     }
 
+    response = client.post("/webhook/whatsapp/zapi/cliente-teste", json=payload, headers=headers)
     assert response.status_code == 200
     res_json = response.json()
     assert res_json["status"] == "accepted"
     mock_analyze_image.assert_called_once()
+
 
 @patch("main.redis_client", new_callable=AsyncMock)
 @patch("main.arq_pool", new_callable=AsyncMock)
