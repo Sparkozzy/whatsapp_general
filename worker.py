@@ -8,7 +8,7 @@ from arq.connections import RedisSettings
 
 from database import ClientDatabaseManager, master_supabase
 from services.whatsapp import send_text, send_audio
-from services.agent import generate_llm_response, format_text_response, generate_tts_audio
+from services.agent import generate_llm_response, generate_llm_response_with_mcp, format_text_response, generate_tts_audio
 
 # EDW Step execution helper with retry and tracking
 async def run_step_with_retry(
@@ -189,16 +189,31 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
 
         # 6. Generate Agent Response (LLM)
         async def call_agent_llm():
-            res = await generate_llm_response(
-                openai_client,
-                system_prompt,
-                chat_history,
-                aggregated_text,
-                model=llm_model,
-                temperature=llm_temperature,
-                fallback_model=fallback_llm_model,
-                fallback_temperature=fallback_llm_temperature
-            )
+            mcp_url = os.getenv("SCHEDULE_MCP_URL")
+            mcp_api_key = os.getenv("SCHEDULE_MCP_API_KEY")
+
+            if mcp_url and mcp_api_key:
+                res = await generate_llm_response_with_mcp(
+                    openai_client,
+                    system_prompt,
+                    chat_history,
+                    aggregated_text,
+                    mcp_url=mcp_url,
+                    mcp_api_key=mcp_api_key,
+                    model=llm_model,
+                    temperature=llm_temperature
+                )
+            else:
+                res = await generate_llm_response(
+                    openai_client,
+                    system_prompt,
+                    chat_history,
+                    aggregated_text,
+                    model=llm_model,
+                    temperature=llm_temperature,
+                    fallback_model=fallback_llm_model,
+                    fallback_temperature=fallback_llm_temperature
+                )
             return res
             
         response_data = await run_step_with_retry("whatsapp_flow_llm_response", execution_id, tenant_supabase, call_agent_llm, {"message": aggregated_text})
