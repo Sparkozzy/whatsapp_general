@@ -66,6 +66,27 @@ A API aceita mensagens do tipo `TEXT` e `AUDIO`. Outros formatos retornarão err
 }
 ```
 
+##### Exemplo de Mensagem de Documento (PDF):
+```json
+{
+  "instanceId": "3B90A...",
+  "eventType": "MESSAGE_RECEIVED",
+  "content": {
+    "type": "DOCUMENT",
+    "text": "Segue contrato para análise",
+    "details": {
+      "from": "5548996027108",
+      "file": {
+        "publicUrl": "https://example.com/contrato.pdf",
+        "fileName": "contrato.pdf"
+      }
+    }
+  }
+}
+```
+> **Nota de Processamento:** Quando um PDF é recebido, a API extrai o texto exclusivamente da **primeira página** via `pypdf` e aciona o modelo `gpt-4o-mini` para classificar o tipo do documento e gerar um resumo dos dados essenciais para o agente principal.
+
+
 #### Respostas
 * **`200 OK` (Mensagem Enfileirada)**: Ocorre quando a mensagem foi adicionada com sucesso ao buffer do Redis para debounce.
   ```json
