@@ -13,7 +13,7 @@ import redis.asyncio as aioredis
 from database import ClientDatabaseManager
 from schemas import ZApiWebhookPayload, CrmWebhookPayload, NormalizedMessage
 from services.whatsapp import transcribe_audio
-from services.agent import analyze_image
+from services.agent import analyze_image, summarize_pdf_first_page
 
 # Global Redis and OpenAI clients
 redis_client = None
@@ -226,15 +226,25 @@ async def zapi_webhook(
             file_url = payload.content.details.file.publicUrl or payload.content.details.file.url
             file_name = payload.content.details.file.fileName or payload.content.details.file.name
         caption = payload.content.text
-        parts = []
-        if file_name:
-            parts.append(f"Arquivo: {file_name}")
-        if caption and caption.strip():
-            parts.append(f"Legenda enviada com o arquivo: {caption.strip()}")
-        if parts:
-            text = f"[Documento PDF recebido | {' | '.join(parts)}]"
+        if file_url:
+            try:
+                text = await summarize_pdf_first_page(openai_client, file_url, file_name=file_name, caption=caption)
+            except Exception as e:
+                print(f"Failed to summarize PDF: {e}")
+                parts = []
+                if file_name:
+                    parts.append(f"Arquivo: {file_name}")
+                if caption and caption.strip():
+                    parts.append(f"Legenda enviada com o arquivo: {caption.strip()}")
+                text = f"[Documento PDF recebido | {' | '.join(parts)}]" if parts else "[Documento PDF recebido pelo usuário]"
         else:
-            text = "[Documento PDF recebido pelo usuário]"
+            parts = []
+            if file_name:
+                parts.append(f"Arquivo: {file_name}")
+            if caption and caption.strip():
+                parts.append(f"Legenda enviada com o arquivo: {caption.strip()}")
+            text = f"[Documento PDF recebido | {' | '.join(parts)}]" if parts else "[Documento PDF recebido pelo usuário]"
+
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -301,15 +311,25 @@ async def crm_webhook(
             file_url = content.details.file.url or content.details.file.publicUrl
             file_name = content.details.file.fileName or content.details.file.name
         caption = content.text
-        parts = []
-        if file_name:
-            parts.append(f"Arquivo: {file_name}")
-        if caption and caption.strip():
-            parts.append(f"Legenda enviada com o arquivo: {caption.strip()}")
-        if parts:
-            text = f"[Documento PDF recebido | {' | '.join(parts)}]"
+        if file_url:
+            try:
+                text = await summarize_pdf_first_page(openai_client, file_url, file_name=file_name, caption=caption)
+            except Exception as e:
+                print(f"Failed to summarize PDF: {e}")
+                parts = []
+                if file_name:
+                    parts.append(f"Arquivo: {file_name}")
+                if caption and caption.strip():
+                    parts.append(f"Legenda enviada com o arquivo: {caption.strip()}")
+                text = f"[Documento PDF recebido | {' | '.join(parts)}]" if parts else "[Documento PDF recebido pelo usuário]"
         else:
-            text = "[Documento PDF recebido pelo usuário]"
+            parts = []
+            if file_name:
+                parts.append(f"Arquivo: {file_name}")
+            if caption and caption.strip():
+                parts.append(f"Legenda enviada com o arquivo: {caption.strip()}")
+            text = f"[Documento PDF recebido | {' | '.join(parts)}]" if parts else "[Documento PDF recebido pelo usuário]"
+
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

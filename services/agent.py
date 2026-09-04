@@ -1,8 +1,12 @@
 import json
 import base64
+import io
+import httpx
 from typing import List, Dict, Any, Optional
+from pypdf import PdfReader
 from mcp.client.sse import sse_client
 from mcp.client.session import ClientSession
+
 
 
 async def generate_llm_response(
@@ -262,3 +266,79 @@ async def generate_llm_response_with_mcp(
         return await generate_llm_response(
             openai_client, system_prompt, chat_history, user_message, model=model, temperature=temperature
         )
+
+
+async def summarize_pdf_first_page(
+    openai_client,
+    file_url: str,
+    file_name: Optional[str] = None,
+    caption: Optional[str] = None
+) -> str:
+    """
+    Downloads PDF, extracts text from page 1 using pypdf, and uses gpt-4o-mini to generate
+    document classification and brief summary for the main agent.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(file_url, follow_redirects=True, timeout=15.0)
+            response.raise_for_status()
+            pdf_bytes = response.content
+
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        if len(reader.pages) == 0:
+            return f"[Documento PDF recebido: {file_name or 'arquivo.pdf'} | PDF sem páginas legíveis]"
+
+        # Extract text ONLY from page 1 (index 0)
+        first_page_text = (reader.pages[0].extract_text() or "").strip()
+
+        if not first_page_text:
+            return (
+                f"[Documento PDF recebido: {file_name or 'arquivo.pdf'} | "
+                f"Primeira página vazia ou sem camada de texto legível (imagem escaneada)]"
+            )
+
+        # Truncate text if excessively long (max 3000 chars for page 1)
+        truncated_text = first_page_text[:3000]
+
+        system_prompt = (
+            "Você é um assistente encarregado de analisar a primeira página de um documento em PDF recebido via WhatsApp.\n"
+            "Sua tarefa é:\n"
+            "1. Identificar o tipo do documento (ex: CNH, RG, Fatura, Contrato, Comprovante de Residência, Holerite, etc.).\n"
+            "2. Fazer um resumo curto, preciso e objetivo das informações e dados principais presentes APENAS nesta primeira página (ex: nomes, datas, valores, assunto).\n\n"
+            "Formato de resposta desejado:\n"
+            "Tipo: <TIPO DO DOCUMENTO>\n"
+            "Resumo: <RESUMO CONCISO DA PÁGINA 1>"
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Texto extraído da primeira página do PDF ({file_name or 'documento.pdf'}):\n\n{truncated_text}"}
+        ]
+
+        if openai_client:
+            llm_res = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.2,
+                max_tokens=300
+            )
+            summary_result = llm_res.choices[0].message.content or "Não foi possível resumir a página."
+        else:
+            summary_result = f"Texto da 1ª página: {truncated_text[:200]}..."
+
+        output_parts = [
+            f"[Documento PDF Recebido (Primeira Página Extraída) | Arquivo: {file_name or 'documento.pdf'}]",
+            summary_result
+        ]
+        if caption and caption.strip():
+            output_parts.append(f"Legenda enviada pelo usuário com o PDF: {caption.strip()}")
+
+        return "\n\n".join(output_parts)
+
+    except Exception as e:
+        print(f"Error summarizing PDF first page: {e}")
+        fallback_parts = [f"[Documento PDF recebido | Arquivo: {file_name or 'documento.pdf'}]"]
+        if caption and caption.strip():
+            fallback_parts.append(f"Legenda enviada: {caption.strip()}")
+        return " | ".join(fallback_parts)
+

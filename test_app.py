@@ -159,12 +159,14 @@ def test_zapi_webhook_image_success(mock_arq, mock_redis, mock_analyze_image, mo
     mock_analyze_image.assert_called_once()
 
 
+@patch("main.summarize_pdf_first_page", new_callable=AsyncMock)
 @patch("main.redis_client", new_callable=AsyncMock)
 @patch("main.arq_pool", new_callable=AsyncMock)
-def test_zapi_webhook_pdf_document_success(mock_arq, mock_redis, mock_client_config, mock_supabase_client):
+def test_zapi_webhook_pdf_document_success(mock_arq, mock_redis, mock_summarize_pdf, mock_client_config, mock_supabase_client):
+    mock_summarize_pdf.return_value = "[Documento PDF Recebido | Tipo: CNH | Resumo: Carteira de Habilitação de João]"
     mock_redis.lrange.side_effect = [
-        ["[Documento PDF recebido | Arquivo: contrato.pdf | Legenda enviada com o arquivo: Segue contrato]"],
-        ["[Documento PDF recebido | Arquivo: contrato.pdf | Legenda enviada com o arquivo: Segue contrato]"]
+        ["[Documento PDF Recebido | Tipo: CNH | Resumo: Carteira de Habilitação de João]"],
+        ["[Documento PDF Recebido | Tipo: CNH | Resumo: Carteira de Habilitação de João]"]
     ]
 
     headers = {"X-MindFlow-Token": "valid-mindflow-token"}
@@ -189,6 +191,8 @@ def test_zapi_webhook_pdf_document_success(mock_arq, mock_redis, mock_client_con
     res_json = response.json()
     assert res_json["status"] == "accepted"
     assert res_json["execution_id"] == "mock-exec-uuid"
+    mock_summarize_pdf.assert_called_once()
+
 
 
 
