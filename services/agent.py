@@ -162,19 +162,22 @@ async def analyze_image(openai_client, image_url: str, caption: Optional[str] = 
     else:
         return f"[Imagem: {description}]"
 
+from contextlib import AsyncExitStack
+
 async def generate_llm_response_with_mcp(
     openai_client,
     system_prompt: str,
     chat_history: List[Dict[str, str]],
     user_message: str,
-    mcp_url: str,
-    mcp_api_key: str,
+    mcp_urls: List[str],
+    mcp_api_key: Optional[str] = None,
     model: str = "gpt-4o",
     temperature: float = 0.8,
 ) -> Dict[str, Any]:
     """
     Generates a response from OpenAI with MCP Tool Calling support.
-    Connects to the given MCP SSE URL, fetches tools, and loops until the agent finishes.
+    Connects to one or multiple MCP SSE URLs via AsyncExitStack, fetches tools,
+    and loops until the agent finishes.
     """
     json_instructions = (
         "\n\nQuando você terminar de usar ferramentas ou quiser enviar uma mensagem final ao usuário, "
@@ -197,70 +200,88 @@ async def generate_llm_response_with_mcp(
     if mcp_api_key:
         headers["Authorization"] = f"Bearer {mcp_api_key}"
 
+    # Ensure mcp_urls is a list
+    if isinstance(mcp_urls, str):
+        mcp_urls = [mcp_urls]
+
     try:
-        async with sse_client(mcp_url, headers=headers) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                tools_result = await session.list_tools()
-                
-                # Convert MCP tools to OpenAI format
-                openai_tools = []
-                for tool in tools_result.tools:
-                    openai_tools.append({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description or "",
-                            "parameters": tool.inputSchema
-                        }
-                    })
+        async with AsyncExitStack() as stack:
+            session_tool_map: Dict[str, ClientSession] = {}
+            openai_tools = []
 
-                while True:
-                    kwargs = {
-                        "model": model,
-                        "messages": messages,
-                        "temperature": temperature,
-                        "response_format": {"type": "json_object"}
-                    }
-                    if openai_tools:
-                        kwargs["tools"] = openai_tools
-                        kwargs["tool_choice"] = "auto"
-                        # OpenAI might complain if response_format is JSON and tools are used in some old API versions,
-                        # but GPT-4o supports JSON mode with tool calling.
-
-                    response = await openai_client.chat.completions.create(**kwargs)
-                    msg = response.choices[0].message
-
-                    if msg.tool_calls:
-                        # Append the assistant's tool call message
-                        messages.append(msg.model_dump(exclude_none=True))
-                        
-                        for tool_call in msg.tool_calls:
-                            try:
-                                args = json.loads(tool_call.function.arguments)
-                                print(f"Calling MCP tool {tool_call.function.name} with args: {args}")
-                                result = await session.call_tool(tool_call.function.name, arguments=args)
-                                # Result content is usually a list of TextContent objects
-                                result_text = "\n".join([c.text for c in result.content if c.type == "text"])
-                            except Exception as tool_err:
-                                result_text = f"Error calling tool: {tool_err}"
-                                print(result_text)
-
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": result_text
-                            })
-                    else:
-                        # Finished using tools, returned the final response
-                        content = msg.content
-                        try:
-                            return json.loads(content)
-                        except json.JSONDecodeError:
-                            return {
-                                "type": "texto",
-                                "output": content or ""
+            for url in mcp_urls:
+                if not url or not isinstance(url, str):
+                    continue
+                try:
+                    streams = await stack.enter_async_context(sse_client(url, headers=headers))
+                    session = await stack.enter_async_context(ClientSession(*streams))
+                    await session.initialize()
+                    tools_result = await session.list_tools()
+                    
+                    for tool in tools_result.tools:
+                        session_tool_map[tool.name] = session
+                        openai_tools.append({
+                            "type": "function",
+                            "function": {
+                                "name": tool.name,
+                                "description": tool.description or "",
+                                "parameters": tool.inputSchema
                             }
+                        })
+                except Exception as conn_err:
+                    print(f"Error connecting to MCP server at {url}: {conn_err}")
+
+            if not session_tool_map:
+                print("No MCP tools available from configured mcp_urls. Falling back to normal response.")
+                return await generate_llm_response(
+                    openai_client, system_prompt, chat_history, user_message, model=model, temperature=temperature
+                )
+
+            while True:
+                kwargs = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "response_format": {"type": "json_object"}
+                }
+                if openai_tools:
+                    kwargs["tools"] = openai_tools
+                    kwargs["tool_choice"] = "auto"
+
+                response = await openai_client.chat.completions.create(**kwargs)
+                msg = response.choices[0].message
+
+                if msg.tool_calls:
+                    messages.append(msg.model_dump(exclude_none=True))
+                    
+                    for tool_call in msg.tool_calls:
+                        tool_name = tool_call.function.name
+                        session = session_tool_map.get(tool_name)
+                        try:
+                            args = json.loads(tool_call.function.arguments)
+                            print(f"Calling MCP tool {tool_name} with args: {args}")
+                            if not session:
+                                raise ValueError(f"No active session for tool '{tool_name}'")
+                            result = await session.call_tool(tool_name, arguments=args)
+                            result_text = "\n".join([c.text for c in result.content if c.type == "text"])
+                        except Exception as tool_err:
+                            result_text = f"Error calling tool: {tool_err}"
+                            print(result_text)
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": result_text
+                        })
+                else:
+                    content = msg.content
+                    try:
+                        return json.loads(content)
+                    except json.JSONDecodeError:
+                        return {
+                            "type": "texto",
+                            "output": content or ""
+                        }
     except Exception as e:
         print(f"Error in MCP loop: {e}. Falling back to normal response.")
         return await generate_llm_response(

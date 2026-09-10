@@ -189,16 +189,20 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
 
         # 6. Generate Agent Response (LLM)
         async def call_agent_llm():
-            mcp_url = os.getenv("SCHEDULE_MCP_URL")
+            client_mcp_urls = config.get("mcp_urls")
+            if not client_mcp_urls or not isinstance(client_mcp_urls, list):
+                env_mcp = os.getenv("SCHEDULE_MCP_URL")
+                client_mcp_urls = [env_mcp] if env_mcp else ["https://schedule-github.bkpxmb.easypanel.host/mcp"]
+
             mcp_api_key = os.getenv("SCHEDULE_MCP_API_KEY")
 
-            if mcp_url and mcp_api_key:
+            if client_mcp_urls:
                 res = await generate_llm_response_with_mcp(
                     openai_client,
                     system_prompt,
                     chat_history,
                     aggregated_text,
-                    mcp_url=mcp_url,
+                    mcp_urls=client_mcp_urls,
                     mcp_api_key=mcp_api_key,
                     model=llm_model,
                     temperature=llm_temperature
