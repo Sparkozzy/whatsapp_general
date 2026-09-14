@@ -204,7 +204,7 @@ async def zapi_webhook(
             audio_url = payload.content.details.file.publicUrl or payload.content.details.file.url
             try:
                 raw_transcription = await transcribe_audio(audio_url, openai_client)
-                text = f'[Mensagem de Áudio Transcrita]: "{raw_transcription}"'
+                text = f"Audio: {raw_transcription}"
             except Exception as e:
                 print(f"Failed to transcribe audio: {e}")
                 text = "[Mensagem de Áudio]"
@@ -291,7 +291,7 @@ async def crm_webhook(
             audio_url = content.details.file.url or content.details.file.publicUrl
         try:
             raw_transcription = await transcribe_audio(audio_url, openai_client)
-            text = f'[Mensagem de Áudio Transcrita]: "{raw_transcription}"'
+            text = f"Audio: {raw_transcription}"
         except Exception as e:
             print(f"Failed to transcribe audio: {e}")
             text = "[Mensagem de Áudio]"
