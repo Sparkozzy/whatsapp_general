@@ -102,10 +102,15 @@ async def format_text_response(openai_client, text_to_format: str) -> List[str]:
     try:
         content = response.choices[0].message.content
         data = json.loads(content)
-        return data.get("mensagens", [text_to_format])
+        mensagens_cruas = data.get("mensagens", [text_to_format])
+        
+        # Limpa espaços em branco e quebras de linha no final/começo, e descarta balões 100% vazios
+        mensagens_limpas = [msg.strip() for msg in mensagens_cruas if msg and msg.strip()]
+        
+        return mensagens_limpas if mensagens_limpas else [text_to_format.strip()]
     except Exception:
         # Fallback to single text if JSON fails
-        return [text_to_format]
+        return [text_to_format.strip()]
 
 async def generate_tts_audio(openai_client, text: str, voice: str = "nova") -> str:
     """
