@@ -88,6 +88,11 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
         prompt_id = config.get("prompt_id")
         voice_id = config.get("voice_id") or "nova"
         
+        # TTS Provider configs (Supabase)
+        tts_provider = config.get("tts_provider") or "openai"
+        tts_format = config.get("tts_format") or "mp3"
+        tts_latency = config.get("tts_latency") or "normal"
+        
         # Fetch LLM configurations (defaulting to n8n parameters if not present)
         llm_model = config.get("llm_model") or "gpt-4"
         llm_temp = config.get("llm_temperature")
@@ -228,7 +233,25 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
         if response_type == "audio":
             # Generate Audio
             async def generate_audio():
-                audio_b64 = await generate_tts_audio(openai_client, output_text, voice=voice_id)
+                if tts_provider == "fish":
+                    from services.agent import generate_fish_audio
+                    try:
+                        audio_b64 = await generate_fish_audio(
+                            text=output_text, 
+                            model_id=voice_id,
+                            audio_format=tts_format,
+                            latency=tts_latency
+                        )
+                    except Exception as e:
+                        print(f"Fallback para OpenAI TTS devido a erro na Fish Audio: {e}")
+                        audio_b64 = await generate_tts_audio(openai_client, output_text, voice="nova")
+                else:
+                    try:
+                        audio_b64 = await generate_tts_audio(openai_client, output_text, voice=voice_id)
+                    except Exception as e:
+                        print(f"Erro na OpenAI com a voz '{voice_id}': {e}. Usando 'nova' como fallback de segurança.")
+                        audio_b64 = await generate_tts_audio(openai_client, output_text, voice="nova")
+                    
                 return {"audio_b64_len": len(audio_b64), "audio_b64": audio_b64}
                 
             audio_res = await run_step_with_retry("whatsapp_flow_tts_generation", execution_id, tenant_supabase, generate_audio, {"text": output_text})

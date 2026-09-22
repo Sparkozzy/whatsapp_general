@@ -2,6 +2,7 @@ import json
 import base64
 import io
 import httpx
+import os
 from typing import List, Dict, Any, Optional
 from pypdf import PdfReader
 from mcp.client.sse import sse_client
@@ -362,4 +363,39 @@ async def summarize_pdf_first_page(
         if caption and caption.strip():
             fallback_parts.append(f"Legenda enviada: {caption.strip()}")
         return " | ".join(fallback_parts)
+
+
+async def generate_fish_audio(text: str, model_id: str, audio_format: str = "mp3", latency: str = "normal") -> str:
+    """
+    Gera áudio super realista usando a Fish Audio (via API V1).
+    Usa a chave FISH_AUDIO_API_KEY das variáveis de ambiente (.env).
+    """
+    api_key = os.getenv("FISH_AUDIO_API_KEY")
+    if not api_key:
+        raise ValueError("FISH_AUDIO_API_KEY não configurada no ambiente.")
+        
+    url = "https://api.fish.audio/v1/tts"
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "text": text,
+        "reference_id": model_id,
+        "format": audio_format,
+        "latency": latency
+    }
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=payload, headers=headers, timeout=20.0)
+        
+        # Fallback de logs em caso de erro na Fish Audio
+        if response.status_code != 200:
+            print(f"Erro na Fish Audio: {response.text}")
+            response.raise_for_status()
+            
+        audio_bytes = response.content
+        return base64.b64encode(audio_bytes).decode("utf-8")
 
