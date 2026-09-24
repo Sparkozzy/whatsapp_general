@@ -244,8 +244,7 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
                         )
                     except Exception as e:
                         print(f"Fallback para OpenAI TTS devido a erro na Fish Audio: {e}")
-                        raise e # Isso aqui vai explodir o erro verdadeiro no terminal!
-                        # audio_b64 = await generate_tts_audio(openai_client, output_text, voice="nova")
+                        audio_b64 = await generate_tts_audio(openai_client, output_text, voice="nova")
                 else:
                     try:
                         audio_b64 = await generate_tts_audio(openai_client, output_text, voice=voice_id)
