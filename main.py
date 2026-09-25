@@ -11,8 +11,9 @@ from arq.connections import RedisSettings
 import redis.asyncio as aioredis
 
 from database import ClientDatabaseManager
-from schemas import ZApiWebhookPayload, CrmWebhookPayload, NormalizedMessage
+from schemas import ZApiWebhookPayload, CrmWebhookPayload, NormalizedMessage, FupRequestPayload
 from services.whatsapp import transcribe_audio
+
 from services.agent import analyze_image, summarize_pdf_first_page
 
 # Global Redis and OpenAI clients
@@ -351,5 +352,45 @@ async def crm_webhook(
 
     res = await handle_normalized_message(msg)
     return res
+
+
+@app.post("/webhook/whatsapp/fup/{client_id}")
+async def fup_webhook(
+    client_id: str,
+    payload: FupRequestPayload,
+    _ = Depends(verify_mindflow_token)
+):
+    """
+    Endpoint para recepção e orquestração de follow-up (FUP) sob demanda.
+    Registra execução mestre em workflow_executions e enfileira no ARQ Redis.
+    """
+    global arq_pool
+    phone = sanitize_phone(payload.phone)
+    tenant_supabase = ClientDatabaseManager.get_client(client_id)
+
+    # 1. Registro mestre inicial EDW (PENDING)
+    res = tenant_supabase.table("workflow_executions").insert({
+        "workflow_name": "fup_flow",
+        "status": "PENDING",
+        "input_data": payload.model_dump()
+    }).execute()
+
+    execution_id = res.data[0]["id"]
+
+    # 2. Enfileirar job no ARQ Redis
+    await arq_pool.enqueue_job(
+        "process_fup_request",
+        client_id,
+        phone,
+        execution_id,
+        payload.custom_context
+    )
+
+    return {
+        "status": "accepted",
+        "message": "FUP request queued successfully.",
+        "execution_id": execution_id
+    }
+
 
 

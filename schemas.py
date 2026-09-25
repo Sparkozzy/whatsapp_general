@@ -62,4 +62,24 @@ class NormalizedMessage(BaseModel):
     file_url: Optional[str] = None
     raw_payload: Dict[str, Any]
 
+# FUP (Follow-up) Schemas
+from typing import Literal
+
+FupActionType = Literal["agendar_mensagem", "figurinha", "ligawhats", "ligacao"]
+
+class FupRequestPayload(BaseModel):
+    client_id: str
+    phone: str
+    lead_id: Optional[str] = None
+    custom_context: Optional[str] = None
+    from_workflow: str = "webhook_fup"
+    execution_id: Optional[str] = None
+
+class FupAgentDecision(BaseModel):
+    acao: FupActionType
+    quando_executar: str  # ISO 8601 com timezone offset obrigatório (ex: 2026-09-25T15:30:00-03:00)
+    conteudo: Optional[str] = None
+    justificativa: Optional[str] = None
+
+
 

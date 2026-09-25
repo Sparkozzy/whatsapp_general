@@ -341,3 +341,150 @@ async def test_process_whatsapp_response_custom_voice(
     mock_generate_tts.assert_called_once_with(ctx["openai"], "Resposta em áudio", voice="shimmer")
 
 
+# ==========================================
+# TESTES DE FUP (FOLLOW-UP AGENT)
+# ==========================================
+
+from services.agent import generate_fup_decision
+from worker import process_fup_request, execute_scheduled_fup_action
+
+@pytest.mark.asyncio
+async def test_generate_fup_decision_success():
+    """
+    Testa se o agente LLM determinístico gera a resposta estrita em JSON
+    com uma das 4 ações e formato válido.
+    """
+    mock_openai = AsyncMock()
+    mock_completion = MagicMock()
+    mock_choice = MagicMock()
+    mock_choice.message.content = (
+        '{"acao": "agendar_mensagem", "quando_executar": "2026-09-25T15:00:00-03:00", '
+        '"conteudo": "Olá, tudo bem?", "justificativa": "Lead inativo há 4 horas"}'
+    )
+    mock_completion.choices = [mock_choice]
+    mock_openai.chat.completions.create.return_value = mock_completion
+
+    lead_info = {"Nome": "Carlos", "Número": "+5548996027108", "Etapa CRM": "Qualificação"}
+    chat_history = [{"role": "user", "content": "Me manda mais detalhes?"}]
+
+    res = await generate_fup_decision(
+        mock_openai,
+        system_prompt="Você é um agente de follow-up",
+        lead_info=lead_info,
+        chat_history=chat_history
+    )
+
+    assert res["acao"] == "agendar_mensagem"
+    assert res["quando_executar"] == "2026-09-25T15:00:00-03:00"
+    assert res["conteudo"] == "Olá, tudo bem?"
+
+
+@pytest.mark.asyncio
+async def test_generate_fup_decision_retry_on_invalid_json():
+    """
+    Testa se o agente executa até 3 retentativas caso a LLM gere JSON inválido
+    ou ação não homologada, recuperando com sucesso na tentativa subsequente.
+    """
+    mock_openai = AsyncMock()
+    
+    mock_fail_choice = MagicMock()
+    mock_fail_choice.message.content = '{"acao": "acao_invalida", "quando_executar": "hoje"}'
+    mock_fail_completion = MagicMock()
+    mock_fail_completion.choices = [mock_fail_choice]
+
+    mock_ok_choice = MagicMock()
+    mock_ok_choice.message.content = '{"acao": "figurinha", "quando_executar": "2026-09-25T16:00:00-03:00", "conteudo": "sticker_1"}'
+    mock_ok_completion = MagicMock()
+    mock_ok_completion.choices = [mock_ok_choice]
+
+    mock_openai.chat.completions.create.side_effect = [mock_fail_completion, mock_ok_completion]
+
+    res = await generate_fup_decision(
+        mock_openai,
+        system_prompt="Prompt",
+        lead_info={"Nome": "Ana"},
+        chat_history=[]
+    )
+
+    assert res["acao"] == "figurinha"
+    assert mock_openai.chat.completions.create.call_count == 2
+
+
+@patch("main.arq_pool", new_callable=AsyncMock)
+def test_fup_webhook_endpoint(mock_arq, mock_client_config, mock_supabase_client):
+    """
+    Testa o endpoint de recepção de FUP POST /webhook/whatsapp/fup/{client_id}
+    """
+    payload = {
+        "client_id": "cliente-teste",
+        "phone": "+5548996027108",
+        "custom_context": "Lead pediu proposta ontem"
+    }
+    headers = {"X-MindFlow-Token": "valid-mindflow-token"}
+
+    response = client.post("/webhook/whatsapp/fup/cliente-teste", json=payload, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+    assert "execution_id" in response.json()
+    mock_arq.enqueue_job.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch("worker.ClientDatabaseManager")
+@patch("worker.master_supabase")
+@patch("worker.run_step_with_retry")
+@patch("worker.generate_fup_decision")
+async def test_process_fup_request_scheduling(
+    mock_generate_fup,
+    mock_run_step,
+    mock_master_supabase,
+    mock_db_mgr
+):
+    """
+    Testa o ciclo completo do worker de FUP:
+    leitura de prompt, LLM determinístico, validação de permissões e agendamento Redis ARQ.
+    """
+    mock_supabase = MagicMock()
+    mock_db_mgr.get_client.return_value = mock_supabase
+    mock_db_mgr.get_client_config.return_value = {
+        "client_id": "cliente-teste",
+        "fup": True,
+        "fup_ligawhats": True,
+        "fup_ligacao": True,
+        "prompt_id": 1
+    }
+
+    mock_generate_fup.return_value = {
+        "acao": "agendar_mensagem",
+        "quando_executar": "2026-09-25T18:00:00-03:00",
+        "conteudo": "Oi, conseguiu ver?",
+        "justificativa": "Follow-up padrão"
+    }
+
+    async def side_effect_run_step(step_name, execution_id, tenant_db, func, *args, **kwargs):
+        return await func()
+    mock_run_step.side_effect = side_effect_run_step
+
+    mock_redis_pool = AsyncMock()
+    mock_job = MagicMock()
+    mock_job.job_id = "test-job-uuid-123"
+    mock_redis_pool.enqueue_job.return_value = mock_job
+
+    ctx = {
+        "openai": AsyncMock(),
+        "redis": mock_redis_pool
+    }
+
+    await process_fup_request(ctx, "cliente-teste", "+5548996027108", "mock-fup-exec-123")
+
+    # Verifica se a task foi enfileirada no Redis com _defer_until
+    mock_redis_pool.enqueue_job.assert_called_once()
+    args, kwargs = mock_redis_pool.enqueue_job.call_args
+    assert args[0] == "execute_scheduled_fup_action"
+    assert args[1] == "cliente-teste"
+    assert args[2] == "+5548996027108"
+    assert args[3] == "agendar_mensagem"
+    assert "_defer_until" in kwargs
+
+
+

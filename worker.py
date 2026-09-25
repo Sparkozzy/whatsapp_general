@@ -8,7 +8,15 @@ from arq.connections import RedisSettings
 
 from database import ClientDatabaseManager, master_supabase
 from services.whatsapp import send_text, send_audio
-from services.agent import generate_llm_response, generate_llm_response_with_mcp, format_text_response, generate_tts_audio
+from services.agent import (
+    generate_llm_response,
+    generate_llm_response_with_mcp,
+    format_text_response,
+    generate_tts_audio,
+    generate_fup_decision
+)
+import httpx
+
 
 # EDW Step execution helper with retry and tracking
 async def run_step_with_retry(
@@ -331,6 +339,316 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
         }).eq("id", execution_id).execute()
         raise e
 
+
+# ==========================================
+# FUP AGENT WORKFLOW TASKS
+# ==========================================
+
+async def execute_scheduled_fup_action(
+    ctx: Dict[str, Any],
+    client_id: str,
+    phone: str,
+    action_type: str,
+    content: str,
+    execution_id: str
+):
+    """
+    Executa a ação de FUP previamente agendada no Redis ARQ (_defer_until).
+    Ações suportadas: 'agendar_mensagem', 'figurinha', 'ligawhats', 'ligacao'.
+    """
+    tenant_supabase = ClientDatabaseManager.get_client(client_id)
+    config = ClientDatabaseManager.get_client_config(client_id)
+
+    step_name = f"fup_flow_execute_{action_type}"
+    
+    async def do_execute():
+        if action_type == "agendar_mensagem":
+            res = await send_text(config, phone, content)
+            return {"status": "sent", "type": "text", "res": res}
+            
+        elif action_type == "figurinha":
+            # Envio de figurinha / sticker via Z-API
+            instance_id = config.get("zapi_instance_id")
+            client_token = config.get("zapi_client_token")
+            security_token = config.get("zapi_security_token")
+            
+            if not instance_id or not client_token:
+                raise ValueError("Missing Z-API credentials for sticker dispatch.")
+                
+            url = f"https://api.z-api.io/instances/{instance_id}/token/{client_token}/send-sticker"
+            headers = {"Client-Token": security_token} if security_token else {}
+            payload = {"phone": phone, "sticker": content}
+            
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                res = await client.post(url, json=payload, headers=headers)
+                res.raise_for_status()
+                return {"status": "sent", "type": "sticker", "res": res.json()}
+                
+        elif action_type == "ligawhats":
+            # Disparo de chamada via WhatsApp
+            url = config.get("pre_call_processing_url") or "https://call-github.bkpxmb.easypanel.host/call"
+            api_token = config.get("mindflow_api_token")
+            headers = {"X-MindFlow-Token": api_token} if api_token else {}
+            payload = {
+                "client_id": client_id,
+                "numero": phone,
+                "canal": "whats",
+                "from_workflow": "fup_flow_ligawhats",
+                "execution_id": execution_id
+            }
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                res = await client.post(url, json=payload, headers=headers)
+                return {"status": "dispatched", "type": "ligawhats", "code": res.status_code}
+                
+        elif action_type == "ligacao":
+            # Disparo de ligação telefônica convencional (Retell / pre_call)
+            url = config.get("pre_call_processing_url") or "https://call-github.bkpxmb.easypanel.host/call"
+            api_token = config.get("mindflow_api_token")
+            headers = {"X-MindFlow-Token": api_token} if api_token else {}
+            payload = {
+                "client_id": client_id,
+                "numero": phone,
+                "canal": "ligacao",
+                "from_workflow": "fup_flow_ligacao",
+                "execution_id": execution_id
+            }
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                res = await client.post(url, json=payload, headers=headers)
+                return {"status": "dispatched", "type": "ligacao", "code": res.status_code}
+        else:
+            raise ValueError(f"Tipo de ação desconhecido: {action_type}")
+
+    await run_step_with_retry(step_name, execution_id, tenant_supabase, do_execute, {"phone": phone, "action": action_type})
+
+
+async def process_fup_request(
+    ctx: Dict[str, Any],
+    client_id: str,
+    phone: str,
+    execution_id: str,
+    custom_context: Optional[str] = None
+):
+    """
+    Workflow do Agente de FUP (fup_flow):
+    1. Leitura de prompt de FUP e permissões do cliente no Supabase.
+    2. Processamento do agente LLM determinístico (mini/micro GPT) com 3 retentativas.
+    3. Leitura e processamento de resposta em JSON.
+    4. Leitura e validação de permissões de uso na tabela client_configurations.
+    5. Transformação de output em agendamento de ação no Redis ARQ (_defer_until).
+    """
+    tenant_supabase = ClientDatabaseManager.get_client(client_id)
+    openai_client = ctx["openai"]
+    redis_pool = ctx.get("redis")  # ARQ Pool injetado no startup
+
+    # Atualiza status mestre para RUNNING
+    tenant_supabase.table("workflow_executions").update({
+        "status": "RUNNING",
+        "started_at": datetime.now(timezone.utc).isoformat()
+    }).eq("id", execution_id).execute()
+
+    try:
+        # 1. Leitura de config no Master e Prompt no Supabase
+        async def fetch_prompt_and_config():
+            config = ClientDatabaseManager.get_client_config(client_id)
+            prompt_id = config.get("prompt_id")
+            
+            # Buscar prompt específico do cliente
+            prompt_text = ""
+            if prompt_id:
+                try:
+                    res_p = master_supabase.table("Prompts").select("Prompt_Text").eq("id", prompt_id).single().execute()
+                    if res_p.data:
+                        prompt_text = res_p.data.get("Prompt_Text", "")
+                except Exception as p_err:
+                    print(f"Não foi possível carregar prompt no master: {p_err}")
+
+            if not prompt_text:
+                # Tentar buscar no banco do cliente caso exista tabela Prompts
+                try:
+                    res_tenant_p = tenant_supabase.table("Prompts").select("Prompt_Text").limit(1).execute()
+                    if res_tenant_p.data:
+                        prompt_text = res_tenant_p.data[0].get("Prompt_Text", "")
+                except Exception:
+                    pass
+
+            if not prompt_text:
+                prompt_text = (
+                    "Você é o Agente de Follow-Up (FUP) oficial. "
+                    "Analise o histórico recente com o lead e decida qual o melhor próximo contato "
+                    "para retomar a negociação de forma humana, consultiva e educada."
+                )
+
+            # Buscar dados do Lead
+            res_lead = tenant_supabase.table("Leads_Mindflow").select("*").eq("Número", phone).limit(1).execute()
+            lead_info = res_lead.data[0] if res_lead.data else {"Número": phone, "Nome": "Cliente"}
+
+            # Buscar histórico recente de conversa
+            history = []
+            try:
+                res_hist = tenant_supabase.table("n8n_chat_histories")\
+                    .select("message, id")\
+                    .eq("session_id", phone)\
+                    .order("id", desc=True)\
+                    .limit(10)\
+                    .execute()
+                for row in reversed(res_hist.data):
+                    msg = row.get("message") or {}
+                    msg_type = msg.get("type")
+                    content = msg.get("content", "")
+                    if isinstance(content, dict):
+                        content = content.get("output") or content.get("text") or str(content)
+                    role = "user" if msg_type == "human" else "assistant"
+                    history.append({"role": role, "content": str(content)})
+            except Exception:
+                history = []
+
+            return {
+                "config": config,
+                "prompt_text": prompt_text,
+                "lead_info": lead_info,
+                "history": history
+            }
+
+        prep_data = await run_step_with_retry(
+            "fup_flow_fetch_prompt_and_config",
+            execution_id,
+            tenant_supabase,
+            fetch_prompt_and_config,
+            {"client_id": client_id, "phone": phone}
+        )
+
+        config = prep_data["config"]
+        system_prompt = prep_data["prompt_text"]
+        lead_info = prep_data["lead_info"]
+        chat_history = prep_data["history"]
+
+        # Adicionar custom_context ao histórico se informado
+        if custom_context:
+            chat_history.append({"role": "system", "content": f"Contexto adicional: {custom_context}"})
+
+        # 2 e 3. Processamento do agente LLM determinístico com 3 retentativas
+        async def call_fup_llm():
+            llm_model = config.get("fallback_llm_model") or "gpt-4o-mini"
+            return await generate_fup_decision(
+                openai_client,
+                system_prompt=system_prompt,
+                lead_info=lead_info,
+                chat_history=chat_history,
+                model=llm_model,
+                temperature=0.2,
+                max_retries=3
+            )
+
+        fup_decision = await run_step_with_retry(
+            "fup_flow_llm_agent",
+            execution_id,
+            tenant_supabase,
+            call_fup_llm,
+            {"phone": phone, "model": config.get("fallback_llm_model") or "gpt-4o-mini"}
+        )
+
+        # 4. Leitura e Validação de Permissões na tabela client_configurations
+        async def validate_permissions():
+            acao = fup_decision.get("acao")
+            is_fup_enabled = config.get("fup", True)  # Se True ou não configurado
+            if is_fup_enabled is False:
+                raise ValueError("FUP_DISABLED_FOR_CLIENT")
+
+            # Validações por tipo de ação
+            if acao == "ligawhats" and not config.get("fup_ligawhats", False):
+                print(f"[FUP] Cliente {client_id} não possui permissão para 'ligawhats'. Fallback para 'agendar_mensagem'.")
+                fup_decision["acao"] = "agendar_mensagem"
+
+            elif acao == "ligacao" and not config.get("fup_ligacao", False):
+                print(f"[FUP] Cliente {client_id} não possui permissão para 'ligacao'. Fallback para 'agendar_mensagem'.")
+                fup_decision["acao"] = "agendar_mensagem"
+
+            return {
+                "acao_aprovada": fup_decision["acao"],
+                "quando_executar": fup_decision.get("quando_executar"),
+                "conteudo": fup_decision.get("conteudo")
+            }
+
+        try:
+            await run_step_with_retry(
+                "fup_flow_validate_permissions",
+                execution_id,
+                tenant_supabase,
+                validate_permissions,
+                {"decision": fup_decision}
+            )
+        except ValueError as err:
+            if str(err) == "FUP_DISABLED_FOR_CLIENT":
+                tenant_supabase.table("workflow_executions").update({
+                    "status": "SUCCESS",
+                    "output_data": {"outcome": "fup_disabled_for_client"},
+                    "completed_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", execution_id).execute()
+                return
+
+        # 5. Transformação de output em agendamento de ação no Redis ARQ (_defer_until)
+        async def schedule_redis_action():
+            quando_str = fup_decision.get("quando_executar")
+            target_dt = None
+            if quando_str:
+                try:
+                    # Converte string ISO para datetime com fuso
+                    target_dt = datetime.fromisoformat(quando_str)
+                    if target_dt.tzinfo is None:
+                        # Se não tiver timezone, assume UTC
+                        target_dt = target_dt.replace(tzinfo=timezone.utc)
+                except Exception as parse_err:
+                    print(f"Erro ao converter data de agendamento: {parse_err}. Executará imediatamente.")
+                    target_dt = datetime.now(timezone.utc)
+            else:
+                target_dt = datetime.now(timezone.utc)
+
+            # Enfileirar tarefa no ARQ com _defer_until
+            job = await redis_pool.enqueue_job(
+                "execute_scheduled_fup_action",
+                client_id,
+                phone,
+                fup_decision["acao"],
+                fup_decision.get("conteudo") or "",
+                execution_id,
+                _defer_until=target_dt
+            )
+            
+            job_id = job.job_id if job else "queued"
+            return {
+                "status": "scheduled",
+                "job_id": job_id,
+                "scheduled_for": target_dt.isoformat(),
+                "action": fup_decision["acao"]
+            }
+
+        schedule_res = await run_step_with_retry(
+            "fup_flow_schedule_action",
+            execution_id,
+            tenant_supabase,
+            schedule_redis_action,
+            {"target_time": fup_decision.get("quando_executar")}
+        )
+
+        # Finalizar master como SUCCESS
+        tenant_supabase.table("workflow_executions").update({
+            "status": "SUCCESS",
+            "output_data": {
+                "decision": fup_decision,
+                "schedule": schedule_res
+            },
+            "completed_at": datetime.now(timezone.utc).isoformat()
+        }).eq("id", execution_id).execute()
+
+    except Exception as e:
+        tenant_supabase.table("workflow_executions").update({
+            "status": "FAILED",
+            "error_details": str(e),
+            "completed_at": datetime.now(timezone.utc).isoformat()
+        }).eq("id", execution_id).execute()
+        raise e
+
+
 # Startup / Shutdown Hooks
 async def startup(ctx):
     openai_key = os.getenv("OPENAI_API_KEY") or os.getenv("Openai_api_key")
@@ -338,13 +656,25 @@ async def startup(ctx):
         raise ValueError("OPENAI_API_KEY (or Openai_api_key) must be set in the environment")
     ctx["openai"] = AsyncOpenAI(api_key=openai_key)
 
+    # Injetar pool do Redis no contexto para agendamento de jobs futuros
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    from arq import create_pool
+    ctx["redis"] = await create_pool(RedisSettings.from_dsn(redis_url))
+
 async def shutdown(ctx):
     if "openai" in ctx:
         await ctx["openai"].close()
+    if "redis" in ctx and ctx["redis"]:
+        await ctx["redis"].close()
 
 # ARQ Worker Settings
 class WorkerSettings:
-    functions = [process_whatsapp_response]
+    functions = [
+        process_whatsapp_response,
+        process_fup_request,
+        execute_scheduled_fup_action
+    ]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(os.getenv("REDIS_URL", "redis://localhost:6379"))
+

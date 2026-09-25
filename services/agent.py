@@ -70,6 +70,94 @@ async def generate_llm_response(
             "output": response.choices[0].message.content or ""
         }
 
+async def generate_fup_decision(
+    openai_client,
+    system_prompt: str,
+    lead_info: Dict[str, Any],
+    chat_history: List[Dict[str, str]],
+    model: str = "gpt-4o-mini",
+    temperature: float = 0.2,
+    max_retries: int = 3
+) -> Dict[str, Any]:
+    """
+    Executa o agente LLM determinístico de Follow-up (FUP).
+    Garante que a resposta saia estritamente em JSON com as chaves:
+    acao ('agendar_mensagem', 'figurinha', 'ligawhats', 'ligacao'),
+    quando_executar (ISO 8601 com fuso), conteudo e justificativa.
+    Aplica até 3 retentativas caso ocorra erro de formatação ou campos ausentes.
+    """
+    valid_actions = {"agendar_mensagem", "figurinha", "ligawhats", "ligacao"}
+    
+    json_instructions = (
+        "\n\n### INSTRUÇÃO CRÍTICA DE FORMATO DE RESPOSTA:\n"
+        "Você é um agente de follow-up (FUP). Você deve responder ESTRITAMENTE em formato JSON válido.\n"
+        "As opções válidas para o campo 'acao' são EXATAMENTE uma das quatro abaixo:\n"
+        "1. 'agendar_mensagem' (enviar mensagem de texto no WhatsApp)\n"
+        "2. 'figurinha' (enviar figurinha de reação/reengajamento)\n"
+        "3. 'ligawhats' (iniciar chamada de voz/áudio no WhatsApp)\n"
+        "4. 'ligacao' (ligação telefônica padrão)\n\n"
+        "O schema JSON obrigatório é:\n"
+        "{\n"
+        '  "acao": "agendar_mensagem" | "figurinha" | "ligawhats" | "ligacao",\n'
+        '  "quando_executar": "YYYY-MM-DDTHH:MM:SS-03:00",\n'
+        '  "conteudo": "Texto da mensagem ou identificador/descrição do sticker",\n'
+        '  "justificativa": "Motivo da escolha desta ação e horário com base no histórico do lead"\n'
+        "}\n"
+        "O campo 'quando_executar' DEVE obrigatoriamente conter o offset do fuso horário (ex: -03:00 para Brasília)."
+    )
+
+    base_messages = [
+        {"role": "system", "content": system_prompt + json_instructions}
+    ]
+
+    # Contexto do Lead
+    context_str = f"Dados do Lead:\n- Nome: {lead_info.get('Nome', 'Desconhecido')}\n- Telefone: {lead_info.get('Número', '')}\n- Etapa: {lead_info.get('Etapa CRM', 'N/A')}\n- Última Interação: {lead_info.get('data ultima msgm', 'N/A')}"
+    base_messages.append({"role": "system", "content": context_str})
+
+    # Histórico de Conversa
+    for msg in chat_history[-10:]:
+        base_messages.append({"role": msg["role"], "content": msg["content"]})
+
+    base_messages.append({
+        "role": "user",
+        "content": "Analise o momento do lead e decida qual a melhor ação de follow-up (FUP), horário ideal de execução e conteúdo correspondente. Responda apenas com o JSON."
+    })
+
+    last_error = None
+    messages_to_send = list(base_messages)
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = await openai_client.chat.completions.create(
+                model=model,
+                messages=messages_to_send,
+                temperature=temperature,
+                response_format={"type": "json_object"}
+            )
+            raw_content = response.choices[0].message.content or ""
+            decision = json.loads(raw_content)
+
+            # Validações semânticas
+            if "acao" not in decision or decision["acao"] not in valid_actions:
+                raise ValueError(f"Campo 'acao' inválido ou ausente. Recebido: {decision.get('acao')}. Válidos: {list(valid_actions)}")
+            if "quando_executar" not in decision or not decision["quando_executar"]:
+                raise ValueError("Campo 'quando_executar' obrigatório não fornecido no JSON.")
+
+            return decision
+
+        except Exception as err:
+            last_error = err
+            print(f"[generate_fup_decision] Tentativa {attempt}/{max_retries} falhou: {err}")
+            if attempt < max_retries:
+                # Alimenta o modelo com a mensagem de correção para a próxima tentativa
+                messages_to_send.append({
+                    "role": "user",
+                    "content": f"Sua resposta anterior não atendeu aos critérios ou gerou erro: {str(err)}. Por favor, corrija e forneça estritamente o JSON com as chaves 'acao', 'quando_executar', 'conteudo' e 'justificativa'."
+                })
+
+    raise ValueError(f"Falha ao gerar decisão de FUP válida após {max_retries} tentativas: {last_error}")
+
+
 async def format_text_response(openai_client, text_to_format: str) -> List[str]:
     """
     Uses OpenAI to format/split a response text into natural, humanized chunks (max 240 chars each).
