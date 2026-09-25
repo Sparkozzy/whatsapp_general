@@ -1,8 +1,9 @@
 import os
 import asyncio
 from datetime import datetime, timezone
-from typing import Callable, Any, Dict
+from typing import Callable, Any, Dict, Optional
 from openai import AsyncOpenAI
+
 from arq import cron
 from arq.connections import RedisSettings
 
