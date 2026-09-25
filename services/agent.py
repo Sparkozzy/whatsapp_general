@@ -88,8 +88,16 @@ async def generate_fup_decision(
     """
     valid_actions = {"agendar_mensagem", "audio", "figurinha", "ligawhats", "ligacao"}
     
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    # Formato de data e hora em Brasília (UTC-3)
+    from datetime import timedelta
+    now_br = now_utc.astimezone(timezone(timedelta(hours=-3)))
+    now_br_str = now_br.strftime("%Y-%m-%d %H:%M:%S")
+
     json_instructions = (
-        "\n\n### INSTRUÇÃO CRÍTICA DE FORMATO DE RESPOSTA:\n"
+        f"\n\n### INSTRUÇÃO CRÍTICA DE FORMATO DE RESPOSTA:\n"
+        f"Data/hora atual de referência: {now_br_str} (Horário de Brasília).\n"
         "Você é um agente de follow-up (FUP). Você deve responder ESTRITAMENTE em formato JSON válido.\n"
         "As opções válidas para o campo 'acao' são EXATAMENTE uma das cinco abaixo:\n"
         "1. 'agendar_mensagem' (enviar mensagem de texto no WhatsApp)\n"
@@ -100,11 +108,11 @@ async def generate_fup_decision(
         "O schema JSON obrigatório é:\n"
         "{\n"
         '  "acao": "agendar_mensagem" | "audio" | "figurinha" | "ligawhats" | "ligacao",\n'
-        '  "quando_executar": "YYYY-MM-DDTHH:MM:SS-03:00",\n'
+        f'  "quando_executar": "YYYY-MM-DDTHH:MM:SS-03:00",\n'
         '  "conteudo": "Texto da mensagem (para texto ou áudio) ou identificador/descrição do sticker",\n'
         '  "justificativa": "Motivo da escolha desta ação e horário com base no histórico do lead"\n'
         "}\n"
-        "O campo 'quando_executar' DEVE obrigatoriamente conter o offset do fuso horário (ex: -03:00 para Brasília)."
+        "IMPORTANTE: O campo 'quando_executar' DEVE ser uma data/hora no FUTURO em relação à data atual, ou momento presente, com o offset do fuso horário (ex: -03:00 para Brasília). NUNCA defina datas no passado."
     )
 
 

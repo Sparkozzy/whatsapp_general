@@ -19,6 +19,15 @@ from services.agent import (
 import httpx
 
 
+def _clean_null_bytes(val: Any) -> Any:
+    if isinstance(val, str):
+        return val.replace("\x00", "")
+    elif isinstance(val, dict):
+        return {k: _clean_null_bytes(v) for k, v in val.items()}
+    elif isinstance(val, list):
+        return [_clean_null_bytes(item) for item in val]
+    return val
+
 # EDW Step execution helper with retry and tracking
 async def run_step_with_retry(
     step_name: str,
@@ -34,6 +43,7 @@ async def run_step_with_retry(
     """
     attempt = 1
     delay = 1.0
+    safe_input = _clean_null_bytes(input_data)
     
     while attempt <= max_retries:
         # Create running step execution record
@@ -42,7 +52,7 @@ async def run_step_with_retry(
             "step_name": step_name,
             "status": "RUNNING",
             "attempt": attempt,
-            "input_data": input_data,
+            "input_data": safe_input,
             "started_at": datetime.now(timezone.utc).isoformat()
         }).execute()
         
@@ -51,18 +61,19 @@ async def run_step_with_retry(
         try:
             # Execute logic
             result = await worker_func()
+            safe_output = _clean_null_bytes(result if isinstance(result, dict) else {"result": str(result)})
             
             # Record success
             tenant_supabase.table("workflow_step_executions").update({
                 "status": "SUCCESS",
-                "output_data": result if isinstance(result, dict) else {"result": str(result)},
+                "output_data": safe_output,
                 "completed_at": datetime.now(timezone.utc).isoformat()
             }).eq("id", step_id).execute()
             
             return result
             
         except Exception as e:
-            error_msg = str(e)
+            error_msg = _clean_null_bytes(str(e))
             
             # Record failure
             tenant_supabase.table("workflow_step_executions").update({
@@ -73,6 +84,7 @@ async def run_step_with_retry(
             
             if attempt == max_retries:
                 raise e
+
             
             # Exponential backoff + jitter
             import sys
@@ -626,6 +638,7 @@ async def process_fup_request(
         # 5. Transformação de output em agendamento de ação no Redis ARQ (_defer_until)
         async def schedule_redis_action():
             quando_str = fup_decision.get("quando_executar")
+            now_dt = datetime.now(timezone.utc)
             target_dt = None
             if quando_str:
                 try:
@@ -636,9 +649,14 @@ async def process_fup_request(
                         target_dt = target_dt.replace(tzinfo=timezone.utc)
                 except Exception as parse_err:
                     print(f"Erro ao converter data de agendamento: {parse_err}. Executará imediatamente.")
-                    target_dt = datetime.now(timezone.utc)
+                    target_dt = now_dt
             else:
-                target_dt = datetime.now(timezone.utc)
+                target_dt = now_dt
+
+            # Se a data calculada for no passado (ex: LLM gerou data antiga), ajusta para agora
+            if target_dt < now_dt:
+                print(f"[schedule_redis_action] Data {target_dt} está no passado em relação a {now_dt}. Ajustando para agora.")
+                target_dt = now_dt
 
             # Enfileirar tarefa no ARQ com _defer_until
             job = await redis_pool.enqueue_job(
@@ -670,17 +688,18 @@ async def process_fup_request(
         # Finalizar master como SUCCESS
         tenant_supabase.table("workflow_executions").update({
             "status": "SUCCESS",
-            "output_data": {
+            "output_data": _clean_null_bytes({
                 "decision": fup_decision,
                 "schedule": schedule_res
-            },
+            }),
             "completed_at": datetime.now(timezone.utc).isoformat()
         }).eq("id", execution_id).execute()
 
     except Exception as e:
+        safe_err = _clean_null_bytes(str(e))
         tenant_supabase.table("workflow_executions").update({
             "status": "FAILED",
-            "error_details": str(e),
+            "error_details": safe_err,
             "completed_at": datetime.now(timezone.utc).isoformat()
         }).eq("id", execution_id).execute()
         raise e
