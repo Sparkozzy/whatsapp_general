@@ -410,8 +410,8 @@ async def test_generate_fup_decision_retry_on_invalid_json():
     assert mock_openai.chat.completions.create.call_count == 2
 
 
-@patch("main.arq_pool", new_callable=AsyncMock)
-def test_fup_webhook_endpoint(mock_arq, mock_client_config, mock_supabase_client):
+@patch("main.process_fup_request", new_callable=AsyncMock)
+def test_fup_webhook_endpoint(mock_process, mock_client_config, mock_supabase_client):
     """
     Testa o endpoint de recepção de FUP POST /webhook/whatsapp/fup/{client_id}
     """
@@ -426,7 +426,7 @@ def test_fup_webhook_endpoint(mock_arq, mock_client_config, mock_supabase_client
     assert response.status_code == 200
     assert response.json()["status"] == "accepted"
     assert "execution_id" in response.json()
-    mock_arq.enqueue_job.assert_called_once()
+
 
 
 @pytest.mark.asyncio

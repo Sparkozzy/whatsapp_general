@@ -15,6 +15,8 @@ from schemas import ZApiWebhookPayload, CrmWebhookPayload, NormalizedMessage, Fu
 from services.whatsapp import transcribe_audio
 
 from services.agent import analyze_image, summarize_pdf_first_page
+from worker import process_fup_request
+
 
 # Global Redis and OpenAI clients
 redis_client = None
@@ -362,9 +364,10 @@ async def fup_webhook(
 ):
     """
     Endpoint para recepção e orquestração de follow-up (FUP) sob demanda.
-    Registra execução mestre em workflow_executions e enfileira no ARQ Redis.
+    Processa a decisão e agendamento de forma autônoma e assíncrona,
+    sem exigir alteração ou redeploy no worker legado.
     """
-    global arq_pool
+    global arq_pool, openai_client
     phone = sanitize_phone(payload.phone)
     tenant_supabase = ClientDatabaseManager.get_client(client_id)
 
@@ -377,20 +380,28 @@ async def fup_webhook(
 
     execution_id = res.data[0]["id"]
 
-    # 2. Enfileirar job no ARQ Redis
-    await arq_pool.enqueue_job(
-        "process_fup_request",
-        client_id,
-        phone,
-        execution_id,
-        payload.custom_context
+    # 2. Executa o workflow de FUP de forma assíncrona in-process (background)
+    ctx = {
+        "openai": openai_client,
+        "redis": arq_pool
+    }
+
+    asyncio.create_task(
+        process_fup_request(
+            ctx=ctx,
+            client_id=client_id,
+            phone=phone,
+            execution_id=execution_id,
+            custom_context=payload.custom_context
+        )
     )
 
     return {
         "status": "accepted",
-        "message": "FUP request queued successfully.",
+        "message": "FUP request initiated successfully in background.",
         "execution_id": execution_id
     }
+
 
 
 
