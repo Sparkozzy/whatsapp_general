@@ -487,4 +487,50 @@ async def test_process_fup_request_scheduling(
     assert "_defer_until" in kwargs
 
 
+@pytest.mark.asyncio
+@patch("worker.ClientDatabaseManager")
+@patch("worker.run_step_with_retry")
+@patch("worker.send_audio")
+@patch("worker.generate_tts_audio")
+async def test_execute_scheduled_fup_audio(
+    mock_generate_tts,
+    mock_send_audio,
+    mock_run_step,
+    mock_db_mgr
+):
+    """
+    Testa a execução agendada da ação 'audio', verificando a síntese de voz (TTS)
+    e envio via Z-API.
+    """
+    mock_supabase = MagicMock()
+    mock_db_mgr.get_client.return_value = mock_supabase
+    mock_db_mgr.get_client_config.return_value = {
+        "client_id": "cliente-teste",
+        "voice_id": "nova",
+        "tts_provider": "openai"
+    }
+
+    mock_generate_tts.return_value = "mocked-audio-b64-content"
+    mock_send_audio.return_value = {"status": "sent"}
+
+    async def side_effect_run_step(step_name, execution_id, tenant_db, func, *args, **kwargs):
+        return await func()
+    mock_run_step.side_effect = side_effect_run_step
+
+    ctx = {"openai": AsyncMock()}
+
+    await execute_scheduled_fup_action(
+        ctx=ctx,
+        client_id="cliente-teste",
+        phone="+5548996027108",
+        action_type="audio",
+        content="Olá, este é um áudio de follow up!",
+        execution_id="mock-exec-audio-123"
+    )
+
+    mock_generate_tts.assert_called_once_with(ctx["openai"], "Olá, este é um áudio de follow up!", voice="nova")
+    mock_send_audio.assert_called_once()
+
+
+
 

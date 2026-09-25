@@ -365,8 +365,39 @@ async def execute_scheduled_fup_action(
         if action_type == "agendar_mensagem":
             res = await send_text(config, phone, content)
             return {"status": "sent", "type": "text", "res": res}
-            
+
+        elif action_type == "audio":
+            # Geração de áudio TTS (OpenAI TTS ou Fish Audio) e envio via Z-API
+            voice_id = config.get("voice_id") or "nova"
+            tts_provider = config.get("tts_provider") or "openai"
+            tts_format = config.get("tts_format") or "mp3"
+            tts_latency = config.get("tts_latency") or "normal"
+            openai_client = ctx["openai"]
+
+            if tts_provider == "fish":
+                from services.agent import generate_fish_audio
+                try:
+                    audio_b64 = await generate_fish_audio(
+                        text=content,
+                        model_id=voice_id,
+                        audio_format=tts_format,
+                        latency=tts_latency
+                    )
+                except Exception as fish_err:
+                    print(f"Fallback para OpenAI TTS devido a erro na Fish Audio: {fish_err}")
+                    audio_b64 = await generate_tts_audio(openai_client, content, voice="nova")
+            else:
+                try:
+                    audio_b64 = await generate_tts_audio(openai_client, content, voice=voice_id)
+                except Exception as openai_err:
+                    print(f"Erro na OpenAI com a voz '{voice_id}': {openai_err}. Usando 'nova' como fallback.")
+                    audio_b64 = await generate_tts_audio(openai_client, content, voice="nova")
+
+            res = await send_audio(config, phone, audio_b64)
+            return {"status": "sent", "type": "audio", "voice": voice_id, "res": res}
+
         elif action_type == "figurinha":
+
             # Envio de figurinha / sticker via Z-API
             instance_id = config.get("zapi_instance_id")
             client_token = config.get("zapi_client_token")
@@ -555,7 +586,11 @@ async def process_fup_request(
                 raise ValueError("FUP_DISABLED_FOR_CLIENT")
 
             # Validações por tipo de ação
-            if acao == "ligawhats" and not config.get("fup_ligawhats", False):
+            if acao == "audio" and config.get("can_send_fup_audio") is False:
+                print(f"[FUP] Cliente {client_id} com can_send_fup_audio=False. Fallback para 'agendar_mensagem'.")
+                fup_decision["acao"] = "agendar_mensagem"
+
+            elif acao == "ligawhats" and not config.get("fup_ligawhats", False):
                 print(f"[FUP] Cliente {client_id} não possui permissão para 'ligawhats'. Fallback para 'agendar_mensagem'.")
                 fup_decision["acao"] = "agendar_mensagem"
 
@@ -568,6 +603,7 @@ async def process_fup_request(
                 "quando_executar": fup_decision.get("quando_executar"),
                 "conteudo": fup_decision.get("conteudo")
             }
+
 
         try:
             await run_step_with_retry(

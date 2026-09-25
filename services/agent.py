@@ -86,25 +86,27 @@ async def generate_fup_decision(
     quando_executar (ISO 8601 com fuso), conteudo e justificativa.
     Aplica até 3 retentativas caso ocorra erro de formatação ou campos ausentes.
     """
-    valid_actions = {"agendar_mensagem", "figurinha", "ligawhats", "ligacao"}
+    valid_actions = {"agendar_mensagem", "audio", "figurinha", "ligawhats", "ligacao"}
     
     json_instructions = (
         "\n\n### INSTRUÇÃO CRÍTICA DE FORMATO DE RESPOSTA:\n"
         "Você é um agente de follow-up (FUP). Você deve responder ESTRITAMENTE em formato JSON válido.\n"
-        "As opções válidas para o campo 'acao' são EXATAMENTE uma das quatro abaixo:\n"
+        "As opções válidas para o campo 'acao' são EXATAMENTE uma das cinco abaixo:\n"
         "1. 'agendar_mensagem' (enviar mensagem de texto no WhatsApp)\n"
-        "2. 'figurinha' (enviar figurinha de reação/reengajamento)\n"
-        "3. 'ligawhats' (iniciar chamada de voz/áudio no WhatsApp)\n"
-        "4. 'ligacao' (ligação telefônica padrão)\n\n"
+        "2. 'audio' (enviar mensagem de áudio sintetizado no WhatsApp)\n"
+        "3. 'figurinha' (enviar figurinha de reação/reengajamento)\n"
+        "4. 'ligawhats' (iniciar chamada de voz/áudio no WhatsApp)\n"
+        "5. 'ligacao' (ligação telefônica padrão)\n\n"
         "O schema JSON obrigatório é:\n"
         "{\n"
-        '  "acao": "agendar_mensagem" | "figurinha" | "ligawhats" | "ligacao",\n'
+        '  "acao": "agendar_mensagem" | "audio" | "figurinha" | "ligawhats" | "ligacao",\n'
         '  "quando_executar": "YYYY-MM-DDTHH:MM:SS-03:00",\n'
-        '  "conteudo": "Texto da mensagem ou identificador/descrição do sticker",\n'
+        '  "conteudo": "Texto da mensagem (para texto ou áudio) ou identificador/descrição do sticker",\n'
         '  "justificativa": "Motivo da escolha desta ação e horário com base no histórico do lead"\n'
         "}\n"
         "O campo 'quando_executar' DEVE obrigatoriamente conter o offset do fuso horário (ex: -03:00 para Brasília)."
     )
+
 
     base_messages = [
         {"role": "system", "content": system_prompt + json_instructions}

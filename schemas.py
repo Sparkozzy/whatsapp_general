@@ -65,7 +65,8 @@ class NormalizedMessage(BaseModel):
 # FUP (Follow-up) Schemas
 from typing import Literal
 
-FupActionType = Literal["agendar_mensagem", "figurinha", "ligawhats", "ligacao"]
+FupActionType = Literal["agendar_mensagem", "audio", "figurinha", "ligawhats", "ligacao"]
+
 
 class FupRequestPayload(BaseModel):
     client_id: str
