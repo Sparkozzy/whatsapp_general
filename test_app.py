@@ -273,18 +273,22 @@ async def test_generate_tts_audio_custom_voice():
 @pytest.mark.asyncio
 @patch("worker.ClientDatabaseManager")
 @patch("worker.master_supabase")
+@patch("worker.generate_llm_response_with_mcp", new_callable=AsyncMock)
 @patch("worker.generate_llm_response", new_callable=AsyncMock)
 @patch("worker.generate_tts_audio", new_callable=AsyncMock)
 @patch("worker.send_audio", new_callable=AsyncMock)
 @patch("worker.run_step_with_retry", new_callable=AsyncMock)
 async def test_process_whatsapp_response_custom_voice(
-    mock_run_step, mock_send_audio, mock_generate_tts, mock_generate_llm, mock_master_supabase, mock_db_mgr
+    mock_run_step, mock_send_audio, mock_generate_tts, mock_generate_llm, mock_generate_mcp, mock_master_supabase, mock_db_mgr
 ):
-    # Mock tenant config returning a custom voice_id
+    # Mock tenant config returning a custom voice_id and zapi tokens
     mock_db_mgr.get_client_config.return_value = {
         "client_id": "cliente-teste",
         "prompt_id": 123,
-        "voice_id": "shimmer"
+        "voice_id": "shimmer",
+        "zapi_instance_id": "123",
+        "zapi_client_token": "token",
+        "mcp_urls": []
     }
     
     # Mock tenant supabase client
@@ -317,7 +321,7 @@ async def test_process_whatsapp_response_custom_voice(
     mock_master_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute = mock_prompt_execute
     
     # Mock LLM response to trigger audio generation
-    mock_generate_llm.return_value = {
+    mock_generate_mcp.return_value = {
         "type": "audio",
         "output": "Resposta em áudio"
     }
