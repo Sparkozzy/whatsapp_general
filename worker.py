@@ -156,7 +156,31 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
             if not prompt_id:
                 raise ValueError("prompt_id not configured for this client.")
             res = master_supabase.table("Prompts").select("Prompt_Text").eq("id", prompt_id).single().execute()
-            return {"prompt": res.data["Prompt_Text"]}
+            data = res.data or {}
+            if isinstance(data, dict):
+                raw_prompt = data.get("Prompt_Text", "") or ""
+            else:
+                raw_prompt = str(data)
+            
+            from zoneinfo import ZoneInfo
+            now_br = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M:%S")
+            
+            mutaveis_section = (
+                f"\n\n<informações_mutáveis>\n"
+                f"Horario atual (brasilia): {now_br}\n"
+                f"Número de celular: {phone}\n"
+                f"</informações_mutáveis>"
+            )
+            
+            formatted_prompt = (
+                str(raw_prompt)
+                .replace("{{$now}}", now_br)
+                .replace("{{now}}", now_br)
+                .replace("{{number}}", phone)
+                .replace("{{phone}}", phone)
+            ) + mutaveis_section
+            
+            return {"prompt": formatted_prompt}
             
         prompt_res = await run_step_with_retry("whatsapp_flow_fetch_prompt", execution_id, tenant_supabase, fetch_prompt, {"prompt_id": prompt_id})
         system_prompt = prompt_res["prompt"]

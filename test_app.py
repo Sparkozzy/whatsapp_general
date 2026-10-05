@@ -341,3 +341,69 @@ async def test_process_whatsapp_response_custom_voice(
     mock_generate_tts.assert_called_once_with(ctx["openai"], "Resposta em áudio", voice="shimmer")
 
 
+@pytest.mark.asyncio
+@patch("worker.ClientDatabaseManager")
+@patch("worker.master_supabase")
+@patch("worker.generate_llm_response_with_mcp", new_callable=AsyncMock)
+@patch("worker.generate_llm_response", new_callable=AsyncMock)
+@patch("worker.format_text_response", new_callable=AsyncMock)
+@patch("worker.send_text", new_callable=AsyncMock)
+@patch("worker.run_step_with_retry", new_callable=AsyncMock)
+async def test_process_whatsapp_response_mutaveis_section(
+    mock_run_step, mock_send_text, mock_format_text, mock_generate_llm, mock_generate_mcp, mock_master_supabase, mock_db_mgr
+):
+    mock_db_mgr.get_client_config.return_value = {
+        "client_id": "cliente-teste",
+        "prompt_id": 123,
+        "mcp_urls": []
+    }
+    
+    mock_supabase = MagicMock()
+    mock_db_mgr.get_client.return_value = mock_supabase
+    
+    def mock_table_routing(table_name):
+        table_mock = MagicMock()
+        execute_mock = MagicMock()
+        if table_name == "Blacklist_Mindflow":
+            execute_mock.return_value.data = []
+        elif table_name == "Leads_Mindflow":
+            execute_mock.return_value.data = [{"id": 1, "Número": "+5548996027108"}]
+        else:
+            execute_mock.return_value.data = [{"id": "mock-id"}]
+            
+        table_mock.select.return_value.eq.return_value.execute = execute_mock
+        table_mock.select.return_value.eq.return_value.order.return_value.limit.return_value.execute = execute_mock
+        table_mock.insert.return_value.execute = execute_mock
+        table_mock.update.return_value.eq.return_value.execute = execute_mock
+        return table_mock
+
+    mock_supabase.table.side_effect = mock_table_routing
+
+    mock_prompt_execute = MagicMock()
+    mock_prompt_execute.data = {"Prompt_Text": "Você é um agente. {{$now}} - {{number}}"}
+    mock_master_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_prompt_execute
+    
+    mock_generate_mcp.return_value = {
+        "type": "texto",
+        "output": "Olá!"
+    }
+    mock_format_text.return_value = ["Olá!"]
+    
+    async def side_effect_run_step(step_name, execution_id, tenant_db, func, *args, **kwargs):
+        return await func()
+    mock_run_step.side_effect = side_effect_run_step
+
+    ctx = {"openai": AsyncMock()}
+    
+    await process_whatsapp_response(ctx, "cliente-teste", "+5548996027108", "Olá", "mock-exec-123")
+    
+    assert mock_generate_mcp.called
+    call_args = mock_generate_mcp.call_args
+    system_prompt_used = call_args[0][1]
+    assert "<informações_mutáveis>" in system_prompt_used
+    assert "Horario atual (brasilia):" in system_prompt_used
+    assert "Número de celular: +5548996027108" in system_prompt_used
+    assert "</informações_mutáveis>" in system_prompt_used
+
+
+
