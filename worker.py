@@ -234,7 +234,9 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
                     mcp_urls=client_mcp_urls,
                     mcp_api_key=mcp_api_key,
                     model=llm_model,
-                    temperature=llm_temperature
+                    temperature=llm_temperature,
+                    execution_id=execution_id,
+                    tenant_supabase=tenant_supabase
                 )
             else:
                 res = await generate_llm_response(

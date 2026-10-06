@@ -169,6 +169,7 @@ async def analyze_image(openai_client, image_url: str, caption: Optional[str] = 
         return f"[Imagem: {description}]"
 
 from contextlib import AsyncExitStack
+from datetime import datetime, timezone
 
 async def generate_llm_response_with_mcp(
     openai_client,
@@ -179,11 +180,13 @@ async def generate_llm_response_with_mcp(
     mcp_api_key: Optional[str] = None,
     model: str = "gpt-4o",
     temperature: float = 0.8,
+    execution_id: Optional[str] = None,
+    tenant_supabase: Any = None
 ) -> Dict[str, Any]:
     """
     Generates a response from OpenAI with MCP Tool Calling support.
     Connects to one or multiple MCP SSE URLs via AsyncExitStack, fetches tools,
-    and loops until the agent finishes.
+    loops until the agent finishes, and records tool execution steps in workflow_step_executions.
     """
     json_instructions = (
         "\n\nQuando você terminar de usar ferramentas ou quiser enviar uma mensagem final ao usuário, "
@@ -200,6 +203,9 @@ async def generate_llm_response_with_mcp(
         messages.append({"role": msg["role"], "content": msg["content"]})
         
     messages.append({"role": "user", "content": user_message})
+
+    # Track executed tools for EDW observability
+    executed_tool_calls: List[Dict[str, Any]] = []
 
     # Prepare SSE headers
     headers = {}
@@ -263,16 +269,82 @@ async def generate_llm_response_with_mcp(
                     for tool_call in msg.tool_calls:
                         tool_name = tool_call.function.name
                         session = session_tool_map.get(tool_name)
+                        step_id = None
+                        args = {}
+                        
                         try:
                             args = json.loads(tool_call.function.arguments)
-                            print(f"Calling MCP tool {tool_name} with args: {args}")
+                        except Exception:
+                            args = {"raw_arguments": tool_call.function.arguments}
+
+                        print(f"Calling MCP tool '{tool_name}' with args: {args}")
+
+                        # 1. Registrar início do step da Tool no Supabase EDW (workflow_step_executions)
+                        if tenant_supabase and execution_id:
+                            try:
+                                step_name = f"whatsapp_flow_tool_{tool_name}"
+                                step_exec = tenant_supabase.table("workflow_step_executions").insert({
+                                    "execution_id": execution_id,
+                                    "step_name": step_name,
+                                    "status": "RUNNING",
+                                    "attempt": 1,
+                                    "input_data": args,
+                                    "started_at": datetime.now(timezone.utc).isoformat()
+                                }).execute()
+                                if step_exec.data:
+                                    step_id = step_exec.data[0]["id"]
+                            except Exception as db_err:
+                                print(f"Aviso: Não foi possível registrar início da tool MCP no Supabase ({db_err})")
+
+                        # 2. Executar a tool no servidor MCP
+                        try:
                             if not session:
                                 raise ValueError(f"No active session for tool '{tool_name}'")
                             result = await session.call_tool(tool_name, arguments=args)
                             result_text = "\n".join([c.text for c in result.content if c.type == "text"])
+
+                            # Registrar sucesso no Supabase EDW
+                            if tenant_supabase and step_id:
+                                try:
+                                    try:
+                                        output_data = json.loads(result_text)
+                                    except Exception:
+                                        output_data = {"result": result_text}
+
+                                    tenant_supabase.table("workflow_step_executions").update({
+                                        "status": "SUCCESS",
+                                        "output_data": output_data,
+                                        "completed_at": datetime.now(timezone.utc).isoformat()
+                                    }).eq("id", step_id).execute()
+                                except Exception as db_err:
+                                    print(f"Aviso: Não foi possível registrar sucesso da tool no Supabase ({db_err})")
+
+                            executed_tool_calls.append({
+                                "tool": tool_name,
+                                "input": args,
+                                "output": result_text
+                            })
+
                         except Exception as tool_err:
                             result_text = f"Error calling tool: {tool_err}"
                             print(result_text)
+
+                            # Registrar falha no Supabase EDW
+                            if tenant_supabase and step_id:
+                                try:
+                                    tenant_supabase.table("workflow_step_executions").update({
+                                        "status": "FAILED",
+                                        "error_details": str(tool_err),
+                                        "completed_at": datetime.now(timezone.utc).isoformat()
+                                    }).eq("id", step_id).execute()
+                                except Exception as db_err:
+                                    print(f"Aviso: Não foi possível registrar falha da tool no Supabase ({db_err})")
+
+                            executed_tool_calls.append({
+                                "tool": tool_name,
+                                "input": args,
+                                "error": str(tool_err)
+                            })
 
                         messages.append({
                             "role": "tool",
@@ -282,12 +354,18 @@ async def generate_llm_response_with_mcp(
                 else:
                     content = msg.content
                     try:
-                        return json.loads(content)
+                        res_json = json.loads(content)
+                        if executed_tool_calls:
+                            res_json["tool_calls"] = executed_tool_calls
+                        return res_json
                     except json.JSONDecodeError:
-                        return {
+                        res_json = {
                             "type": "texto",
                             "output": content or ""
                         }
+                        if executed_tool_calls:
+                            res_json["tool_calls"] = executed_tool_calls
+                        return res_json
     except Exception as e:
         print(f"Error in MCP loop: {e}. Falling back to normal response.")
         return await generate_llm_response(
