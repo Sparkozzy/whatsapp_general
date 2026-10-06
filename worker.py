@@ -172,12 +172,21 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
                 f"</informações_mutáveis>"
             )
             
+            lead_name = (lead.get("Nome") if isinstance(lead, dict) else None) or "Cliente"
+            lead_email = (lead.get("Email") if isinstance(lead, dict) else None) or "."
+            
             formatted_prompt = (
                 str(raw_prompt)
                 .replace("{{$now}}", now_br)
                 .replace("{{now}}", now_br)
                 .replace("{{number}}", phone)
                 .replace("{{phone}}", phone)
+                .replace("{{sender_phone}}", phone)
+                .replace("{{numero_do_lead}}", phone)
+                .replace("{{client_id}}", str(client_id))
+                .replace("{{lead_name}}", lead_name)
+                .replace("{{customer_name}}", lead_name)
+                .replace("{{email}}", lead_email)
             ) + mutaveis_section
             
             return {"prompt": formatted_prompt}
