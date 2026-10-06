@@ -223,7 +223,7 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
                 env_mcp = os.getenv("SCHEDULE_MCP_URL")
                 client_mcp_urls = [env_mcp] if env_mcp else ["https://schedule-github.bkpxmb.easypanel.host/mcp"]
 
-            mcp_api_key = os.getenv("SCHEDULE_MCP_API_KEY")
+            mcp_api_key = os.getenv("SCHEDULE_MCP_API_KEY") or "mf_sk_2026_pre_call_xK9v3Qm7bR4wT1nZ"
 
             if client_mcp_urls:
                 res = await generate_llm_response_with_mcp(

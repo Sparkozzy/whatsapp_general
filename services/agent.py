@@ -216,6 +216,23 @@ async def generate_llm_response_with_mcp(
     if isinstance(mcp_urls, str):
         mcp_urls = [mcp_urls]
 
+    # Track MCP connection step in Supabase EDW
+    step_conn_id = None
+    if tenant_supabase and execution_id:
+        try:
+            step_exec = tenant_supabase.table("workflow_step_executions").insert({
+                "execution_id": execution_id,
+                "step_name": "whatsapp_flow_mcp_connection",
+                "status": "RUNNING",
+                "attempt": 1,
+                "input_data": {"mcp_urls": mcp_urls},
+                "started_at": datetime.now(timezone.utc).isoformat()
+            }).execute()
+            if step_exec.data:
+                step_conn_id = step_exec.data[0]["id"]
+        except Exception as db_err:
+            print(f"Aviso: Não foi possível registrar início da conexão MCP no Supabase ({db_err})")
+
     try:
         async with AsyncExitStack() as stack:
             session_tool_map: Dict[str, ClientSession] = {}
@@ -245,9 +262,28 @@ async def generate_llm_response_with_mcp(
 
             if not session_tool_map:
                 print("No MCP tools available from configured mcp_urls. Falling back to normal response.")
+                if tenant_supabase and step_conn_id:
+                    try:
+                        tenant_supabase.table("workflow_step_executions").update({
+                            "status": "FAILED",
+                            "error_details": f"Nenhuma ferramenta MCP foi carregada das URLs: {mcp_urls}",
+                            "completed_at": datetime.now(timezone.utc).isoformat()
+                        }).eq("id", step_conn_id).execute()
+                    except Exception:
+                        pass
                 return await generate_llm_response(
                     openai_client, system_prompt, chat_history, user_message, model=model, temperature=temperature
                 )
+
+            if tenant_supabase and step_conn_id:
+                try:
+                    tenant_supabase.table("workflow_step_executions").update({
+                        "status": "SUCCESS",
+                        "output_data": {"loaded_tools": list(session_tool_map.keys())},
+                        "completed_at": datetime.now(timezone.utc).isoformat()
+                    }).eq("id", step_conn_id).execute()
+                except Exception:
+                    pass
 
             while True:
                 kwargs = {
