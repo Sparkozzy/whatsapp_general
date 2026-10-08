@@ -10,7 +10,7 @@ services:
       - redis_data:/data
     restart: always
 
-  api:
+  whatsapp_general_github:
     build: .
     container_name: whatsapp_api
     command: uvicorn main:app --host 0.0.0.0 --port 8000
