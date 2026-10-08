@@ -42,6 +42,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MindFlow WhatsApp Multi-tenant API", lifespan=lifespan)
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "service": "whatsapp-general"}
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     body = await request.body()
