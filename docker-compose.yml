@@ -16,11 +16,6 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
-    networks:
-      default:
-        aliases:
-          - whatsapp_general_github
-          - whatsapp_api
     environment:
       - REDIS_URL=redis://redis:6379
       - MASTER_SUPABASE_URL=${MASTER_SUPABASE_URL}
