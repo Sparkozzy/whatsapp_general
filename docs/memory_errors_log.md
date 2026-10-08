@@ -28,6 +28,8 @@
 
 ---
 
-### 4. Tratativa de Inicialização Resiliente no Lifespan da API
-- **Erro Ocorrido:** Oscilação ou atraso de inicialização do Redis travava o startup do Uvicorn no FastAPI, gerando `504 Gateway Timeout` ou `502 Bad Gateway`.
-- **Regra de Prevenção:** O manipulador `lifespan` do FastAPI deve isolar em bloco `try/except` a criação do pool do Redis (`create_pool`), garantindo que o servidor Uvicorn abra as portas HTTP de healthcheck sem travar o processo inicial.
+### 5. `poetry.lock` Ignorado no `.gitignore` Causal de Cache Retido no Docker Build
+- **Erro Ocorrido:** A alteração da versão do Pydantic no `pyproject.toml` não era aplicada no Easypanel, mantendo o erro `ImportError` mesmo após o push.
+- **Causa-Raiz:** O arquivo `.gitignore` continha a regra `poetry.lock`. O Dockerfile copiava `COPY pyproject.toml poetry.lock* ./` e executava `RUN poetry install`. Como o `poetry.lock` não existia no repositório Git, o Docker reutilizava a camada de cache antiga com as dependências desatualizadas.
+- **Regra de Prevenção:** Nunca adicionar `poetry.lock` no `.gitignore` em projetos com deploy via Dockerfile. O `poetry.lock` deve estar sempre versionado para garantir reprodutibilidade exata dos builds.
+
