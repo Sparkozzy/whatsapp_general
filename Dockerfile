@@ -19,8 +19,10 @@ ENV PATH="$POETRY_HOME/bin:$PATH"
 # Copy package config files
 COPY pyproject.toml poetry.lock* ./
 
-# Install dependencies
+# Install dependencies (forced cache invalidation for Pydantic update)
+ARG REBUILD_CACHE=20261008_v2
 RUN poetry install --no-root --only main
+
 
 # Copy application files
 COPY . .
