@@ -336,6 +336,26 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
             
         await run_step_with_retry("whatsapp_flow_save_memory", execution_id, tenant_supabase, save_chat_memory, {"phone": phone})
 
+        # Trigger FUP flow safely in background
+        try:
+            fup_exec_res = tenant_supabase.table("workflow_executions").insert({
+                "workflow_name": "fup_flow",
+                "status": "PENDING",
+                "input_data": {"client_id": client_id, "phone": phone, "trigger": "post_whatsapp_response"}
+            }).execute()
+            if fup_exec_res.data:
+                fup_execution_id = fup_exec_res.data[0]["id"]
+                asyncio.create_task(
+                    process_fup_request(
+                        ctx=ctx,
+                        client_id=client_id,
+                        phone=phone,
+                        execution_id=fup_execution_id
+                    )
+                )
+        except Exception as fup_err:
+            print(f"[FUP Trigger Warning] Failed to trigger FUP process: {fup_err}")
+
         # Finish master as SUCCESS
         tenant_supabase.table("workflow_executions").update({
             "status": "SUCCESS",
