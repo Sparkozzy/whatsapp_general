@@ -172,6 +172,28 @@ async def handle_normalized_message(msg: NormalizedMessage):
             aggregated_text,
             execution_id
         )
+
+        # Trigger FUP flow in-process
+        try:
+            fup_exec_res = tenant_supabase.table("workflow_executions").insert({
+                "workflow_name": "fup_flow",
+                "status": "PENDING",
+                "input_data": {"client_id": msg.client_id, "phone": msg.phone, "trigger": "inbound_whatsapp_message"}
+            }).execute()
+            if fup_exec_res.data:
+                fup_execution_id = fup_exec_res.data[0]["id"]
+                ctx = {"openai": openai_client, "redis": arq_pool}
+                asyncio.create_task(
+                    process_fup_request(
+                        ctx=ctx,
+                        client_id=msg.client_id,
+                        phone=msg.phone,
+                        execution_id=fup_execution_id
+                    )
+                )
+        except Exception as fup_err:
+            print(f"[FUP In-Process Warning] Failed to trigger FUP: {fup_err}")
+
         return {
             "status": "accepted",
             "message": "Message buffered and execution scheduled.",
