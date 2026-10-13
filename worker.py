@@ -1,6 +1,6 @@
 import os
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Callable, Any, Dict, Optional
 from openai import AsyncOpenAI
 
@@ -371,25 +371,36 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
             
         await run_step_with_retry("whatsapp_flow_save_memory", execution_id, tenant_supabase, save_chat_memory, {"phone": phone})
 
-        # Trigger FUP flow safely in background
+        # Trigger FUP flow safely scheduled after 10 minutes of inactivity
         try:
             fup_exec_res = tenant_supabase.table("workflow_executions").insert({
                 "workflow_name": "fup_flow",
                 "status": "PENDING",
-                "input_data": {"client_id": client_id, "phone": phone, "trigger": "post_whatsapp_response"}
+                "input_data": {"client_id": client_id, "phone": phone, "trigger": "post_whatsapp_response", "delay_minutes": 10}
             }).execute()
             if fup_exec_res.data:
                 fup_execution_id = fup_exec_res.data[0]["id"]
-                asyncio.create_task(
-                    process_fup_request(
-                        ctx=ctx,
-                        client_id=client_id,
-                        phone=phone,
-                        execution_id=fup_execution_id
+                redis_pool = ctx.get("redis")
+                fup_target_time = datetime.now(timezone.utc) + timedelta(minutes=10)
+                if redis_pool:
+                    await redis_pool.enqueue_job(
+                        "process_fup_request",
+                        client_id,
+                        phone,
+                        fup_execution_id,
+                        _defer_until=fup_target_time
                     )
-                )
+                else:
+                    asyncio.create_task(
+                        process_fup_request(
+                            ctx=ctx,
+                            client_id=client_id,
+                            phone=phone,
+                            execution_id=fup_execution_id
+                        )
+                    )
         except Exception as fup_err:
-            print(f"[FUP Trigger Warning] Failed to trigger FUP process: {fup_err}")
+            print(f"[FUP Trigger Warning] Failed to schedule FUP process: {fup_err}")
 
         # Finish master as SUCCESS
         tenant_supabase.table("workflow_executions").update({
@@ -429,6 +440,23 @@ async def execute_scheduled_fup_action(
 
     step_name = f"fup_flow_execute_{action_type}"
     
+    # 0. Verificação de segurança: se o lead interagiu recentemente, cancela a ação de FUP
+    try:
+        res_lead = tenant_supabase.table("Leads_Mindflow").select("data ultima msgm").eq("Número", phone).limit(1).execute()
+        if res_lead.data and res_lead.data[0].get("data ultima msgm"):
+            last_dt = datetime.fromisoformat(res_lead.data[0]["data ultima msgm"])
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - last_dt).total_seconds() < 600:
+                print(f"[execute_scheduled_fup_action] Lead {phone} interagiu nos últimos 10 minutos. Cancelando envio agendado de FUP.")
+                tenant_supabase.table("workflow_executions").update({
+                    "output_data": {"outcome": "cancelled_lead_interacted_recently"},
+                    "completed_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", execution_id).execute()
+                return {"status": "cancelled", "reason": "lead_interacted_recently"}
+    except Exception as check_err:
+        print(f"[execute_scheduled_fup_action] Aviso ao checar última mensagem: {check_err}")
+
     async def do_execute():
         if action_type == "agendar_mensagem":
             res = await send_text(config, phone, content)
@@ -620,6 +648,43 @@ async def process_fup_request(
         system_prompt = prep_data["prompt_text"]
         lead_info = prep_data["lead_info"]
         chat_history = prep_data["history"]
+
+        # 1.1 Verificação de inatividade: se o lead conversou nos últimos 10 minutos, abortar o FUP (salvo custom_context manual)
+        if not custom_context:
+            async def check_inactivity():
+                last_msg_date_str = lead_info.get("data ultima msgm")
+                if last_msg_date_str:
+                    try:
+                        last_dt = datetime.fromisoformat(last_msg_date_str)
+                        if last_dt.tzinfo is None:
+                            last_dt = last_dt.replace(tzinfo=timezone.utc)
+                        diff_seconds = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                        # Se interagiu há menos de 10 minutos (600s), aborta
+                        if diff_seconds < 600:
+                            raise ValueError("LEAD_INTERACTED_RECENTLY")
+                    except ValueError as ve:
+                        if str(ve) == "LEAD_INTERACTED_RECENTLY":
+                            raise ve
+                    except Exception:
+                        pass
+                return {"status": "inactive_confirmed"}
+
+            try:
+                await run_step_with_retry(
+                    "fup_flow_check_inactivity",
+                    execution_id,
+                    tenant_supabase,
+                    check_inactivity,
+                    {"last_msg_time": lead_info.get("data ultima msgm")}
+                )
+            except ValueError as err:
+                if str(err) == "LEAD_INTERACTED_RECENTLY":
+                    tenant_supabase.table("workflow_executions").update({
+                        "status": "SUCCESS",
+                        "output_data": {"outcome": "lead_interacted_recently_skipped"},
+                        "completed_at": datetime.now(timezone.utc).isoformat()
+                    }).eq("id", execution_id).execute()
+                    return
 
         # Adicionar custom_context ao histórico se informado
         if custom_context:
