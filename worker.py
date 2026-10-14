@@ -533,7 +533,13 @@ async def execute_scheduled_fup_action(
             if not url.endswith("/webhook"):
                 url = url.rstrip("/") + "/webhook"
             api_token = config.get("mindflow_api_token")
-            headers = {"X-MindFlow-Token": api_token} if api_token else {}
+            pre_call_api_key = os.getenv("PRE_CALL_API_KEY", "mf_sk_2026_pre_call_xK9v3Qm7bR4wT1nZ")
+            headers = {
+                "X-API-Key": pre_call_api_key,
+                "Content-Type": "application/json"
+            }
+            if api_token:
+                headers["X-MindFlow-Token"] = api_token
             
             # Recupera dados cadastrais do lead para preencher os campos obrigatórios do pre_call
             try:
