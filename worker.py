@@ -529,19 +529,35 @@ async def execute_scheduled_fup_action(
                 
         elif action_type == "ligacao":
             # Disparo de ligação telefônica convencional (Retell / pre_call)
-            url = config.get("pre_call_processing_url") or "https://call-github.bkpxmb.easypanel.host/call"
+            url = config.get("pre_call_processing_url") or "https://call-github.bkpxmb.easypanel.host/webhook"
+            if not url.endswith("/webhook"):
+                url = url.rstrip("/") + "/webhook"
             api_token = config.get("mindflow_api_token")
             headers = {"X-MindFlow-Token": api_token} if api_token else {}
+            
+            # Recupera dados cadastrais do lead para preencher os campos obrigatórios do pre_call
+            try:
+                res_lead_call = tenant_supabase.table("Leads_Mindflow").select("Nome, Email").eq("Número", phone).limit(1).execute()
+                lead_data_call = res_lead_call.data[0] if res_lead_call.data else {}
+            except Exception:
+                lead_data_call = {}
+                
+            lead_name = lead_data_call.get("Nome") or "Cliente"
+            lead_email = lead_data_call.get("Email") or f"{phone.replace('+', '')}@mindflow-ia.com"
+            agent_id = config.get("agent_id_ligacao_whatsapp") or config.get("agent_id")
+            
             payload = {
-                "client_id": client_id,
+                "workflow_name": "fup_flow_ligacao",
+                "execution_id": execution_id,
                 "numero": phone,
-                "canal": "ligacao",
-                "from_workflow": "fup_flow_ligacao",
-                "execution_id": execution_id
+                "nome": lead_name,
+                "email": lead_email,
+                "agent_id": agent_id,
+                "contexto": content or "Follow-up de reengajamento via ligação telefônica"
             }
             async with httpx.AsyncClient(timeout=15.0) as client:
                 res = await client.post(url, json=payload, headers=headers)
-                return {"status": "dispatched", "type": "ligacao", "code": res.status_code}
+                return {"status": "dispatched", "type": "ligacao", "code": res.status_code, "res": res.text[:200]}
         else:
             raise ValueError(f"Tipo de ação desconhecido: {action_type}")
 
