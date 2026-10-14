@@ -598,3 +598,63 @@ async def test_execute_scheduled_fup_audio(
 
     mock_generate_tts.assert_called_once_with(ctx["openai"], "Olá, este é um áudio de follow up!", voice="nova")
     mock_send_audio.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch("worker.ClientDatabaseManager")
+@patch("worker.run_step_with_retry")
+@patch("httpx.AsyncClient.post")
+async def test_execute_scheduled_fup_ligacao(
+    mock_http_post,
+    mock_run_step,
+    mock_db_mgr
+):
+    """
+    Testa a execução agendada da ação 'ligacao', garantindo que o webhook
+    do pre_call_processing seja chamado com X-API-Key e Prompt_id.
+    """
+    mock_supabase = MagicMock()
+    # Simula Leads_Mindflow vazio ou sem mensagem recente para passar no check de inatividade
+    mock_res_lead = MagicMock()
+    mock_res_lead.data = [{"data ultima msgm": "2020-01-01T00:00:00+00:00", "Nome": "Lead Teste", "Email": "lead@teste.com"}]
+    mock_supabase.table().select().eq().limit().execute.return_value = mock_res_lead
+
+    mock_db_mgr.get_client.return_value = mock_supabase
+    mock_db_mgr.get_client_config.return_value = {
+        "client_id": "cliente-teste",
+        "pre_call_processing_url": "https://call-github.bkpxmb.easypanel.host/webhook",
+        "prompt_id": 1,
+        "agent_id_ligacao_whatsapp": "agent_test_123"
+    }
+
+    async def side_effect_run_step(step_name, execution_id, tenant_db, func, *args, **kwargs):
+        return await func()
+    mock_run_step.side_effect = side_effect_run_step
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 202
+    mock_resp.text = '{"status":"success"}'
+    mock_http_post.return_value = mock_resp
+
+    ctx = {"openai": AsyncMock()}
+
+    await execute_scheduled_fup_action(
+        ctx=ctx,
+        client_id="cliente-teste",
+        phone="+5548996027108",
+        action_type="ligacao",
+        content="Follow-up ligação telefônica",
+        execution_id="mock-exec-ligacao-123"
+    )
+
+    mock_http_post.assert_called_once()
+    called_url = mock_http_post.call_args[0][0]
+    called_kwargs = mock_http_post.call_args[1]
+    assert called_url == "https://call-github.bkpxmb.easypanel.host/webhook"
+    assert "X-API-Key" in called_kwargs["headers"]
+    payload = called_kwargs["json"]
+    assert payload["workflow_name"] == "fup_flow_ligacao"
+    assert payload["Prompt_id"] == "1"
+    assert payload["agent_id"] == "agent_test_123"
+    assert payload["numero"] == "+5548996027108"
+

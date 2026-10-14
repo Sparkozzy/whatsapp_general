@@ -551,6 +551,7 @@ async def execute_scheduled_fup_action(
             lead_name = lead_data_call.get("Nome") or "Cliente"
             lead_email = lead_data_call.get("Email") or f"{phone.replace('+', '')}@mindflow-ia.com"
             agent_id = config.get("agent_id_ligacao_whatsapp") or config.get("agent_id")
+            prompt_id = config.get("prompt_id")
             
             payload = {
                 "workflow_name": "fup_flow_ligacao",
@@ -559,6 +560,7 @@ async def execute_scheduled_fup_action(
                 "nome": lead_name,
                 "email": lead_email,
                 "agent_id": agent_id,
+                "Prompt_id": str(prompt_id) if prompt_id else None,
                 "contexto": content or "Follow-up de reengajamento via ligação telefônica"
             }
             async with httpx.AsyncClient(timeout=15.0) as client:
