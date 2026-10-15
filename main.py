@@ -200,6 +200,13 @@ async def zapi_webhook(
     if payload.eventType != "MESSAGE_RECEIVED":
         return {"status": "ignored", "reason": "Not a MESSAGE_RECEIVED event."}
 
+    # Deduplication check: drop duplicate retries within 5 minutes
+    if payload.messageId and redis_client:
+        dedup_key = f"whatsapp_dedup:{client_id}:{payload.messageId}"
+        is_new = await redis_client.set(dedup_key, "1", nx=True, ex=300)
+        if not is_new:
+            return {"status": "ignored", "reason": "duplicate_message_id"}
+
     content_type = payload.content.type.upper()
     phone = sanitize_phone(payload.content.details.sender_from)
     
@@ -268,6 +275,7 @@ async def zapi_webhook(
         phone=phone,
         text=text,
         type=content_type.lower(),
+        message_id=payload.messageId,
         audio_url=audio_url,
         image_url=image_url,
         file_url=file_url if content_type in ["DOCUMENT", "PDF", "FILE", "DOCUMENT_RECEIVED"] else None,

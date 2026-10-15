@@ -126,6 +126,36 @@ def test_zapi_webhook_success(mock_arq, mock_redis, mock_client_config, mock_sup
         "mock-exec-uuid"
     )
 
+@patch("main.redis_client", new_callable=AsyncMock)
+@patch("main.arq_pool", new_callable=AsyncMock)
+def test_zapi_webhook_duplicate_message_id_ignored(mock_arq, mock_redis, mock_client_config, mock_supabase_client):
+    # Simulate first message succeeds (set returns True), second returns False (duplicate)
+    mock_redis.set.return_value = False
+
+    headers = {"X-MindFlow-Token": "valid-mindflow-token"}
+    payload = {
+        "instanceId": "instance-123",
+        "messageId": "msg-duplicate-1925",
+        "eventType": "MESSAGE_RECEIVED",
+        "content": {
+            "type": "TEXT",
+            "text": "Olá",
+            "details": {
+                "from": "5548996027108"
+            }
+        }
+    }
+
+    response = client.post("/webhook/whatsapp/zapi/cliente-teste", json=payload, headers=headers)
+    assert response.status_code == 200
+    res_json = response.json()
+    assert res_json["status"] == "ignored"
+    assert res_json["reason"] == "duplicate_message_id"
+
+    # Ensure Redis debounce list push and arq enqueue were NOT called
+    mock_redis.rpush.assert_not_called()
+    mock_arq.enqueue_job.assert_not_called()
+
 @patch("main.analyze_image", new_callable=AsyncMock)
 @patch("main.redis_client", new_callable=AsyncMock)
 @patch("main.arq_pool", new_callable=AsyncMock)

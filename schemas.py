@@ -21,6 +21,7 @@ class ZApiContent(BaseModel):
 
 class ZApiWebhookPayload(BaseModel):
     instanceId: Optional[str] = None
+    messageId: Optional[str] = None
     eventType: str
     content: ZApiContent
 
@@ -57,6 +58,7 @@ class NormalizedMessage(BaseModel):
     phone: str
     text: str
     type: str  # texto, audio, imagem, documento, etc.
+    message_id: Optional[str] = None
     audio_url: Optional[str] = None
     image_url: Optional[str] = None
     file_url: Optional[str] = None
