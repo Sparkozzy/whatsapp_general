@@ -688,3 +688,63 @@ async def test_execute_scheduled_fup_ligacao(
     assert payload["agent_id"] == "agent_test_123"
     assert payload["numero"] == "+5548996027108"
 
+
+@pytest.mark.asyncio
+@patch("worker.ClientDatabaseManager")
+@patch("worker.run_step_with_retry")
+@patch("worker.send_text")
+async def test_execute_scheduled_fup_chains_next_attempt(
+    mock_send_text,
+    mock_run_step,
+    mock_db_mgr
+):
+    """
+    Testa se o execute_scheduled_fup_action encadeia com sucesso a próxima
+    etapa da cadência no Redis ARQ quando attempt < quantidade_fup_whats.
+    """
+    mock_supabase = MagicMock()
+    mock_res_lead = MagicMock()
+    mock_res_lead.data = [{"data ultima msgm": "2020-01-01T00:00:00+00:00"}]
+    mock_supabase.table().select().eq().limit().execute.return_value = mock_res_lead
+    
+    mock_exec_res = MagicMock()
+    mock_exec_res.data = [{"id": "mock-next-fup-exec-456"}]
+    mock_supabase.table().insert().execute.return_value = mock_exec_res
+
+    mock_db_mgr.get_client.return_value = mock_supabase
+    mock_db_mgr.get_client_config.return_value = {
+        "client_id": "cliente-teste",
+        "quantidade_fup_whats": 3
+    }
+
+    mock_send_text.return_value = {"status": "sent"}
+
+    async def side_effect_run_step(step_name, execution_id, tenant_db, func, *args, **kwargs):
+        return await func()
+    mock_run_step.side_effect = side_effect_run_step
+
+    mock_redis_pool = AsyncMock()
+    ctx = {
+        "openai": AsyncMock(),
+        "redis": mock_redis_pool
+    }
+
+    await execute_scheduled_fup_action(
+        ctx=ctx,
+        client_id="cliente-teste",
+        phone="+5548996027108",
+        action_type="agendar_mensagem",
+        content="Mensagem etapa 1",
+        execution_id="mock-exec-step-1",
+        attempt=1
+    )
+
+    # Verifica se a próxima etapa (#2) foi enfileirada no ARQ
+    mock_redis_pool.enqueue_job.assert_called_once_with(
+        "process_fup_request",
+        "cliente-teste",
+        "+5548996027108",
+        "mock-next-fup-exec-456",
+        2
+    )
+

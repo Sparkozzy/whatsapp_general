@@ -62,3 +62,14 @@ Os passos seguem a convenção de nomenclatura `{workflow_name}_{OQF}` e são ex
   - Converte o horário `quando_executar` para datetime UTC.
   - Enfileira a task de execução no ARQ (`enqueue_job("execute_scheduled_fup_action", ..., _defer_until=exec_time_utc)`).
   - Registra a confirmação com o job ID do Redis em `workflow_step_executions`.
+
+---
+
+## 4. Encadeamento da Cadência (Multi-Step Recursivo)
+
+Para garantir que réguas de tentativas (ex: Tentativa 1, 2 e 3) sejam executadas de ponta a ponta:
+1. Após a execução bem-sucedida de `execute_scheduled_fup_action`, a ação é salva em `n8n_chat_histories` com a tag `[Follow-up {action} - Tentativa {attempt}]`.
+2. Se `attempt < quantidade_fup_whats`, o worker cria uma nova execução filha de `fup_flow` e enfileira `process_fup_request` com `attempt = attempt + 1`.
+3. O LLM é instruído com o número da tentativa atual (`attempt`), consulta a régua correspondente no prompt (`<Tentativa_X>`) e agenda o próximo disparo no futuro.
+4. Se o lead responder a qualquer momento no WhatsApp, a verificação de inatividade (`diff_seconds < 600`) cancela automaticamente os passos agendados futuros.
+5. Caso a régua chegue ao fim ou não haja novas ações, o LLM retorna `acao: "nenhuma"` e o ciclo é encerrado graciosamente.

@@ -77,16 +77,17 @@ async def generate_fup_decision(
     chat_history: List[Dict[str, str]],
     model: str = "gpt-4o-mini",
     temperature: float = 0.2,
-    max_retries: int = 3
+    max_retries: int = 3,
+    attempt: int = 1
 ) -> Dict[str, Any]:
     """
     Executa o agente LLM determinístico de Follow-up (FUP).
     Garante que a resposta saia estritamente em JSON com as chaves:
-    acao ('agendar_mensagem', 'figurinha', 'ligawhats', 'ligacao'),
+    acao ('agendar_mensagem', 'audio', 'figurinha', 'ligawhats', 'ligacao', 'nenhuma'),
     quando_executar (ISO 8601 com fuso), conteudo e justificativa.
     Aplica até 3 retentativas caso ocorra erro de formatação ou campos ausentes.
     """
-    valid_actions = {"agendar_mensagem", "audio", "figurinha", "ligawhats", "ligacao"}
+    valid_actions = {"agendar_mensagem", "audio", "figurinha", "ligawhats", "ligacao", "nenhuma"}
     
     from datetime import datetime, timezone
     now_utc = datetime.now(timezone.utc)
@@ -98,16 +99,18 @@ async def generate_fup_decision(
     json_instructions = (
         f"\n\n### INSTRUÇÃO CRÍTICA DE FORMATO DE RESPOSTA:\n"
         f"Data/hora atual de referência: {now_br_str} (Horário de Brasília).\n"
+        f"Tentativa atual da régua de follow-up: Tentativa {attempt}.\n"
         "Você é um agente de follow-up (FUP). Você deve responder ESTRITAMENTE em formato JSON válido.\n"
-        "As opções válidas para o campo 'acao' são EXATAMENTE uma das cinco abaixo:\n"
+        "As opções válidas para o campo 'acao' são EXATAMENTE uma das opções abaixo:\n"
         "1. 'agendar_mensagem' (enviar mensagem de texto no WhatsApp)\n"
         "2. 'audio' (enviar mensagem de áudio sintetizado no WhatsApp)\n"
         "3. 'figurinha' (enviar figurinha de reação/reengajamento)\n"
         "4. 'ligawhats' (iniciar chamada de voz/áudio no WhatsApp)\n"
-        "5. 'ligacao' (ligação telefônica padrão)\n\n"
+        "5. 'ligacao' (ligação telefônica padrão)\n"
+        "6. 'nenhuma' (caso a régua de follow-up já tenha se esgotado ou nenhuma ação deva ser realizada)\n\n"
         "O schema JSON obrigatório é:\n"
         "{\n"
-        '  "acao": "agendar_mensagem" | "audio" | "figurinha" | "ligawhats" | "ligacao",\n'
+        '  "acao": "agendar_mensagem" | "audio" | "figurinha" | "ligawhats" | "ligacao" | "nenhuma",\n'
         f'  "quando_executar": "YYYY-MM-DDTHH:MM:SS-03:00",\n'
         '  "conteudo": "Texto da mensagem (para texto ou áudio) ou identificador/descrição do sticker",\n'
         '  "justificativa": "Motivo da escolha desta ação e horário com base no histórico do lead"\n'
@@ -121,7 +124,14 @@ async def generate_fup_decision(
     ]
 
     # Contexto do Lead
-    context_str = f"Dados do Lead:\n- Nome: {lead_info.get('Nome', 'Desconhecido')}\n- Telefone: {lead_info.get('Número', '')}\n- Etapa: {lead_info.get('Etapa CRM', 'N/A')}\n- Última Interação: {lead_info.get('data ultima msgm', 'N/A')}"
+    context_str = (
+        f"Dados do Lead:\n"
+        f"- Nome: {lead_info.get('Nome', 'Desconhecido')}\n"
+        f"- Telefone: {lead_info.get('Número', '')}\n"
+        f"- Etapa: {lead_info.get('Etapa CRM', 'N/A')}\n"
+        f"- Última Interação do Lead: {lead_info.get('data ultima msgm', 'N/A')}\n"
+        f"- Etapa da Cadência de FUP: Tentativa {attempt}"
+    )
     base_messages.append({"role": "system", "content": context_str})
 
     # Histórico de Conversa
@@ -130,7 +140,12 @@ async def generate_fup_decision(
 
     base_messages.append({
         "role": "user",
-        "content": "Analise o momento do lead e decida qual a melhor ação de follow-up (FUP), horário ideal de execução e conteúdo correspondente. Responda apenas com o JSON."
+        "content": (
+            f"Esta é a etapa #{attempt} da régua de follow-up (FUP) para este lead. "
+            f"Consulte a régua de tentativas definida no prompt especificamente para a Tentativa {attempt} (ou próxima etapa cabível). "
+            f"Analise o histórico recente (identificando quais ações já foram tomadas) e decida a ação de follow-up para a Tentativa {attempt}, "
+            "horário ideal de execução e conteúdo correspondente. Responda apenas com o JSON."
+        )
     })
 
     last_error = None
@@ -601,6 +616,7 @@ async def generate_fish_audio(text: str, model_id: str, audio_format: str = "mp3
     payload = {
         "text": text,
         "reference_id": model_id,
+        "model": "s2.1-pro",
         "format": audio_format,
         "latency": latency
     }

@@ -388,6 +388,7 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
                         client_id,
                         phone,
                         fup_execution_id,
+                        1,
                         _defer_until=fup_target_time
                     )
                 else:
@@ -396,7 +397,8 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
                             ctx=ctx,
                             client_id=client_id,
                             phone=phone,
-                            execution_id=fup_execution_id
+                            execution_id=fup_execution_id,
+                            attempt=1
                         )
                     )
         except Exception as fup_err:
@@ -429,7 +431,8 @@ async def execute_scheduled_fup_action(
     phone: str,
     action_type: str,
     content: str,
-    execution_id: str
+    execution_id: str,
+    attempt: int = 1
 ):
     """
     Executa a ação de FUP previamente agendada no Redis ARQ (_defer_until).
@@ -566,10 +569,74 @@ async def execute_scheduled_fup_action(
             async with httpx.AsyncClient(timeout=15.0) as client:
                 res = await client.post(url, json=payload, headers=headers)
                 return {"status": "dispatched", "type": "ligacao", "code": res.status_code, "res": res.text[:200]}
+        elif action_type in ("nenhuma", "congelar", "cancelar"):
+            return {"status": "completed", "outcome": "cadence_exhausted_or_skipped"}
         else:
             raise ValueError(f"Tipo de ação desconhecido: {action_type}")
 
     await run_step_with_retry(step_name, execution_id, tenant_supabase, do_execute, {"phone": phone, "action": action_type})
+
+    # 1. Registrar ação executada no histórico de chat para memória contextual do LLM
+    if action_type not in ("nenhuma", "congelar", "cancelar"):
+        try:
+            tenant_supabase.table("n8n_chat_histories").insert({
+                "session_id": phone,
+                "message": {
+                    "type": "ai",
+                    "content": f"[Follow-up {action_type} - Tentativa {attempt}]: {content}",
+                    "additional_kwargs": {
+                        "fup_action": action_type,
+                        "attempt": attempt,
+                        "execution_id": execution_id
+                    },
+                    "response_metadata": {}
+                },
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }).execute()
+        except Exception as hist_err:
+            print(f"[execute_scheduled_fup_action] Aviso ao registrar histórico: {hist_err}")
+
+    # 2. Encadeamento automático da próxima etapa da cadência de FUP
+    if action_type not in ("nenhuma", "congelar", "cancelar"):
+        max_fup = config.get("quantidade_fup_whats")
+        try:
+            max_fup = int(max_fup) if max_fup is not None else 3
+        except Exception:
+            max_fup = 3
+
+        if max_fup <= 0:
+            max_fup = 3
+
+        next_attempt = attempt + 1
+        if next_attempt <= max_fup:
+            redis_pool = ctx.get("redis")
+            if redis_pool:
+                try:
+                    next_exec = tenant_supabase.table("workflow_executions").insert({
+                        "workflow_name": "fup_flow",
+                        "status": "PENDING",
+                        "input_data": {
+                            "client_id": client_id,
+                            "phone": phone,
+                            "trigger": f"fup_cadence_step_{next_attempt}",
+                            "previous_action": action_type,
+                            "previous_execution_id": execution_id,
+                            "attempt": next_attempt
+                        }
+                    }).execute()
+
+                    if next_exec.data:
+                        next_execution_id = next_exec.data[0]["id"]
+                        await redis_pool.enqueue_job(
+                            "process_fup_request",
+                            client_id,
+                            phone,
+                            next_execution_id,
+                            next_attempt
+                        )
+                        print(f"[execute_scheduled_fup_action] Próxima etapa #{next_attempt} enfileirada no ARQ (ID: {next_execution_id}).")
+                except Exception as chain_err:
+                    print(f"[execute_scheduled_fup_action] Erro ao encadear próxima etapa #{next_attempt} do FUP: {chain_err}")
 
 
 async def process_fup_request(
@@ -577,6 +644,7 @@ async def process_fup_request(
     client_id: str,
     phone: str,
     execution_id: str,
+    attempt: int = 1,
     custom_context: Optional[str] = None
 ):
     """
@@ -724,7 +792,8 @@ async def process_fup_request(
                 chat_history=chat_history,
                 model=llm_model,
                 temperature=0.2,
-                max_retries=3
+                max_retries=3,
+                attempt=attempt
             )
 
         fup_decision = await run_step_with_retry(
@@ -732,7 +801,7 @@ async def process_fup_request(
             execution_id,
             tenant_supabase,
             call_fup_llm,
-            {"phone": phone, "model": config.get("fallback_llm_model") or "gpt-4o-mini"}
+            {"phone": phone, "model": config.get("fallback_llm_model") or "gpt-4o-mini", "attempt": attempt}
         )
 
         # 4. Leitura e Validação de Permissões na tabela client_configurations
@@ -781,6 +850,13 @@ async def process_fup_request(
 
         # 5. Transformação de output em agendamento de ação no Redis ARQ (_defer_until)
         async def schedule_redis_action():
+            if fup_decision.get("acao") in ("nenhuma", "congelar", "cancelar"):
+                return {
+                    "status": "completed",
+                    "action": "nenhuma",
+                    "reason": "cadence_exhausted_or_skipped"
+                }
+
             quando_str = fup_decision.get("quando_executar")
             now_dt = datetime.now(timezone.utc)
             target_dt = None
@@ -810,6 +886,7 @@ async def process_fup_request(
                 fup_decision["acao"],
                 fup_decision.get("conteudo") or "",
                 execution_id,
+                attempt,
                 _defer_until=target_dt
             )
             
@@ -818,7 +895,8 @@ async def process_fup_request(
                 "status": "scheduled",
                 "job_id": job_id,
                 "scheduled_for": target_dt.isoformat(),
-                "action": fup_decision["acao"]
+                "action": fup_decision["acao"],
+                "attempt": attempt
             }
 
         schedule_res = await run_step_with_retry(
