@@ -119,6 +119,18 @@ async def generate_fup_decision(
     )
 
 
+    last_msg_raw = lead_info.get("data ultima msgm")
+    last_msg_br = "N/A"
+    if last_msg_raw:
+        try:
+            last_dt = datetime.fromisoformat(str(last_msg_raw))
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            last_dt_br = last_dt.astimezone(timezone(timedelta(hours=-3)))
+            last_msg_br = last_dt_br.strftime("%Y-%m-%d %H:%M:%S (Horário de Brasília)")
+        except Exception:
+            last_msg_br = str(last_msg_raw)
+
     base_messages = [
         {"role": "system", "content": system_prompt + json_instructions}
     ]
@@ -129,7 +141,7 @@ async def generate_fup_decision(
         f"- Nome: {lead_info.get('Nome', 'Desconhecido')}\n"
         f"- Telefone: {lead_info.get('Número', '')}\n"
         f"- Etapa: {lead_info.get('Etapa CRM', 'N/A')}\n"
-        f"- Última Interação do Lead: {lead_info.get('data ultima msgm', 'N/A')}\n"
+        f"- Última Interação do Lead (Início do silêncio): {last_msg_br}\n"
         f"- Etapa da Cadência de FUP: Tentativa {attempt}"
     )
     base_messages.append({"role": "system", "content": context_str})
