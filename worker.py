@@ -443,22 +443,110 @@ async def execute_scheduled_fup_action(
 
     step_name = f"fup_flow_execute_{action_type}"
     
-    # 0. Verificação de segurança: se o lead interagiu recentemente, cancela a ação de FUP
+    # 0. Verificação de segurança robusta:
+    # a) Se o lead interagiu nos últimos 10 minutos OU após a criação desta execução, cancela a ação de FUP.
+    # b) Anti-duplicidade/Cooldown: Se já houve outro FUP disparado nos últimos 30 minutos, cancela.
+    # c) Limite de tentativas: Se o lead já recebeu >= quantidade_fup_whats no ciclo atual, cancela.
     try:
         res_lead = tenant_supabase.table("Leads_Mindflow").select("data ultima msgm").eq("Número", phone).limit(1).execute()
+        lead_last_dt = None
         if res_lead.data and res_lead.data[0].get("data ultima msgm"):
-            last_dt = datetime.fromisoformat(res_lead.data[0]["data ultima msgm"])
-            if last_dt.tzinfo is None:
-                last_dt = last_dt.replace(tzinfo=timezone.utc)
-            if (datetime.now(timezone.utc) - last_dt).total_seconds() < 600:
+            lead_last_dt = datetime.fromisoformat(res_lead.data[0]["data ultima msgm"])
+            if lead_last_dt.tzinfo is None:
+                lead_last_dt = lead_last_dt.replace(tzinfo=timezone.utc)
+
+            # a) Se interagiu nos últimos 10 minutos
+            if (datetime.now(timezone.utc) - lead_last_dt).total_seconds() < 600:
                 print(f"[execute_scheduled_fup_action] Lead {phone} interagiu nos últimos 10 minutos. Cancelando envio agendado de FUP.")
                 tenant_supabase.table("workflow_executions").update({
                     "output_data": {"outcome": "cancelled_lead_interacted_recently"},
                     "completed_at": datetime.now(timezone.utc).isoformat()
                 }).eq("id", execution_id).execute()
                 return {"status": "cancelled", "reason": "lead_interacted_recently"}
+
+        # Consulta histórico de mensagens recentes do lead para validar contagem real e cooldown
+        history_query = tenant_supabase.table("n8n_chat_histories")\
+            .select("id, created_at, message")\
+            .eq("session_id", phone)\
+            .order("created_at", desc=True)\
+            .limit(20)\
+            .execute()
+
+        recent_msgs = history_query.data or []
+        fup_msgs_after_lead = []
+        last_fup_time = None
+
+        for m in recent_msgs:
+            m_time_str = m.get("created_at")
+            if not m_time_str:
+                continue
+            m_dt = datetime.fromisoformat(m_time_str)
+            if m_dt.tzinfo is None:
+                m_dt = m_dt.replace(tzinfo=timezone.utc)
+
+            # Se a mensagem for anterior à última resposta do lead, para a contagem do ciclo
+            if lead_last_dt and m_dt <= lead_last_dt:
+                break
+
+            msg_payload = m.get("message") or {}
+            content_str = msg_payload.get("content", "")
+            add_kwargs = msg_payload.get("additional_kwargs") or {}
+
+            if add_kwargs.get("fup_action") or (isinstance(content_str, str) and content_str.startswith("[Follow-up")):
+                fup_msgs_after_lead.append((m_dt, m))
+                if last_fup_time is None:
+                    last_fup_time = m_dt
+
+        # b) Trava de Idempotência por Tentativa:
+        # Se a mesma tentativa (ex: Tentativa 3) já foi executada neste ciclo de inatividade, cancela a duplicata!
+        for _, prev_fup in fup_msgs_after_lead:
+            prev_kwargs = (prev_fup.get("message") or {}).get("additional_kwargs") or {}
+            prev_content = (prev_fup.get("message") or {}).get("content") or ""
+            prev_attempt = prev_kwargs.get("attempt")
+            if prev_attempt is not None and int(prev_attempt) == int(attempt):
+                print(f"[execute_scheduled_fup_action] Tentativa #{attempt} já foi executada para o lead {phone} neste ciclo. Cancelando disparo redundante.")
+                tenant_supabase.table("workflow_executions").update({
+                    "output_data": {"outcome": f"cancelled_attempt_{attempt}_already_executed"},
+                    "completed_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", execution_id).execute()
+                return {"status": "cancelled", "reason": f"attempt_{attempt}_already_executed"}
+            elif f"Tentativa {attempt}" in str(prev_content):
+                print(f"[execute_scheduled_fup_action] Tentativa #{attempt} já identificada no conteúdo para o lead {phone}. Cancelando disparo redundante.")
+                tenant_supabase.table("workflow_executions").update({
+                    "output_data": {"outcome": f"cancelled_attempt_{attempt}_already_executed"},
+                    "completed_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", execution_id).execute()
+                return {"status": "cancelled", "reason": f"attempt_{attempt}_already_executed"}
+
+        # Trava anti-duplicidade imediata (caso 2 workers acordem no mesmo segundo):
+        # Se um FUP foi gravado há menos de 3 minutos (180s), aborta para evitar colisão milissegundo a milissegundo
+        if last_fup_time and (datetime.now(timezone.utc) - last_fup_time).total_seconds() < 180:
+            print(f"[execute_scheduled_fup_action] Lead {phone} já recebeu FUP há menos de 3 minutos ({last_fup_time}). Cancelando colisão simultânea.")
+            tenant_supabase.table("workflow_executions").update({
+                "output_data": {"outcome": "cancelled_fup_immediate_collision", "last_fup_time": last_fup_time.isoformat()},
+                "completed_at": datetime.now(timezone.utc).isoformat()
+            }).eq("id", execution_id).execute()
+            return {"status": "cancelled", "reason": "fup_immediate_collision"}
+
+        # c) Limite real de tentativas do tenant
+        max_fup = config.get("quantidade_fup_whats")
+        try:
+            max_fup = int(max_fup) if max_fup is not None else 3
+        except Exception:
+            max_fup = 3
+        if max_fup <= 0:
+            max_fup = 3
+
+        if len(fup_msgs_after_lead) >= max_fup:
+            print(f"[execute_scheduled_fup_action] Lead {phone} já recebeu {len(fup_msgs_after_lead)} FUPs (máximo={max_fup}). Cancelando.")
+            tenant_supabase.table("workflow_executions").update({
+                "output_data": {"outcome": "cancelled_max_fup_reached", "fup_count": len(fup_msgs_after_lead)},
+                "completed_at": datetime.now(timezone.utc).isoformat()
+            }).eq("id", execution_id).execute()
+            return {"status": "cancelled", "reason": "max_fup_reached"}
+
     except Exception as check_err:
-        print(f"[execute_scheduled_fup_action] Aviso ao checar última mensagem: {check_err}")
+        print(f"[execute_scheduled_fup_action] Aviso ao checar segurança de FUP: {check_err}")
 
     async def do_execute():
         if action_type == "agendar_mensagem":
@@ -741,17 +829,18 @@ async def process_fup_request(
         lead_info = prep_data["lead_info"]
         chat_history = prep_data["history"]
 
-        # 1.1 Verificação de inatividade: se o lead conversou nos últimos 10 minutos, abortar o FUP (salvo custom_context manual)
+        # 1.1 Verificação de inatividade e ciclo de FUP:
+        # Se o lead conversou nos últimos 10 minutos, OU se já atingiu o limite de FUPs, OU se houve FUP há menos de 30 min, aborta
         if not custom_context:
             async def check_inactivity():
                 last_msg_date_str = lead_info.get("data ultima msgm")
+                last_dt = None
                 if last_msg_date_str:
                     try:
                         last_dt = datetime.fromisoformat(last_msg_date_str)
                         if last_dt.tzinfo is None:
                             last_dt = last_dt.replace(tzinfo=timezone.utc)
                         diff_seconds = (datetime.now(timezone.utc) - last_dt).total_seconds()
-                        # Se interagiu há menos de 10 minutos (600s), aborta
                         if diff_seconds < 600:
                             raise ValueError("LEAD_INTERACTED_RECENTLY")
                     except ValueError as ve:
@@ -759,6 +848,76 @@ async def process_fup_request(
                             raise ve
                     except Exception:
                         pass
+
+                # Consulta histórico recente para verificar se já atingiu o limite ou está em cooldown
+                try:
+                    res_hist_fup = tenant_supabase.table("n8n_chat_histories")\
+                        .select("id, created_at, message")\
+                        .eq("session_id", phone)\
+                        .order("created_at", desc=True)\
+                        .limit(20)\
+                        .execute()
+                    
+                    recent_msgs = res_hist_fup.data or []
+                    fup_count = 0
+                    last_fup_dt = None
+                    for m in recent_msgs:
+                        m_time_str = m.get("created_at")
+                        if not m_time_str:
+                            continue
+                        m_dt = datetime.fromisoformat(m_time_str)
+                        if m_dt.tzinfo is None:
+                            m_dt = m_dt.replace(tzinfo=timezone.utc)
+                        if last_dt and m_dt <= last_dt:
+                            break
+                        msg_p = m.get("message") or {}
+                        c_str = msg_p.get("content", "")
+                        add_k = msg_p.get("additional_kwargs") or {}
+                        if add_k.get("fup_action") or (isinstance(c_str, str) and c_str.startswith("[Follow-up")):
+                            fup_count += 1
+                            if last_fup_dt is None:
+                                last_fup_dt = m_dt
+
+                    # Se a tentativa solicitada já foi executada no ciclo atual, aborta
+                    for m in recent_msgs:
+                        m_time_str = m.get("created_at")
+                        if not m_time_str:
+                            continue
+                        m_dt = datetime.fromisoformat(m_time_str)
+                        if m_dt.tzinfo is None:
+                            m_dt = m_dt.replace(tzinfo=timezone.utc)
+                        if last_dt and m_dt <= last_dt:
+                            break
+                        msg_p = m.get("message") or {}
+                        add_k = msg_p.get("additional_kwargs") or {}
+                        c_str = msg_p.get("content", "")
+                        prev_att = add_k.get("attempt")
+                        if prev_att is not None and int(prev_att) == int(attempt):
+                            raise ValueError("ATTEMPT_ALREADY_EXECUTED")
+                        elif f"Tentativa {attempt}" in str(c_str):
+                            raise ValueError("ATTEMPT_ALREADY_EXECUTED")
+
+                    # Se já enviou o máximo de FUPs configurado
+                    max_fup = config.get("quantidade_fup_whats")
+                    try:
+                        max_fup = int(max_fup) if max_fup is not None else 3
+                    except Exception:
+                        max_fup = 3
+                    if max_fup <= 0:
+                        max_fup = 3
+
+                    if fup_count >= max_fup:
+                        raise ValueError("MAX_FUP_REACHED")
+
+                    # Trava imediata de 3 minutos para evitar concorrência no mesmo instante
+                    if last_fup_dt and (datetime.now(timezone.utc) - last_fup_dt).total_seconds() < 180:
+                        raise ValueError("FUP_IMMEDIATE_COLLISION")
+
+                except ValueError as ve:
+                    raise ve
+                except Exception as e_check:
+                    print(f"[check_inactivity] Erro ao checar histórico: {e_check}")
+
                 return {"status": "inactive_confirmed"}
 
             try:
@@ -770,10 +929,17 @@ async def process_fup_request(
                     {"last_msg_time": lead_info.get("data ultima msgm")}
                 )
             except ValueError as err:
-                if str(err) == "LEAD_INTERACTED_RECENTLY":
+                err_str = str(err)
+                if err_str in ("LEAD_INTERACTED_RECENTLY", "MAX_FUP_REACHED", "ATTEMPT_ALREADY_EXECUTED", "FUP_IMMEDIATE_COLLISION"):
+                    outcome_map = {
+                        "LEAD_INTERACTED_RECENTLY": "lead_interacted_recently_skipped",
+                        "MAX_FUP_REACHED": "max_fup_reached_skipped",
+                        "ATTEMPT_ALREADY_EXECUTED": f"attempt_{attempt}_already_executed_skipped",
+                        "FUP_IMMEDIATE_COLLISION": "fup_immediate_collision_skipped"
+                    }
                     tenant_supabase.table("workflow_executions").update({
                         "status": "SUCCESS",
-                        "output_data": {"outcome": "lead_interacted_recently_skipped"},
+                        "output_data": {"outcome": outcome_map[err_str]},
                         "completed_at": datetime.now(timezone.utc).isoformat()
                     }).eq("id", execution_id).execute()
                     return
@@ -877,6 +1043,19 @@ async def process_fup_request(
             if target_dt < now_dt:
                 print(f"[schedule_redis_action] Data {target_dt} está no passado em relação a {now_dt}. Ajustando para agora.")
                 target_dt = now_dt
+
+            # Sanitização de Fim de Semana (Regra fup_fds do tenant):
+            # Se fup_fds for False e a data agendada cair no Sábado (5) ou Domingo (6),
+            # ajusta automaticamente para a próxima Segunda-feira às 09:30 da manhã (horário comercial).
+            if not config.get("fup_fds", False):
+                # Converte target_dt para o fuso local de São Paulo para checar o dia da semana real
+                tz_br = timezone(timedelta(hours=-3))
+                target_br = target_dt.astimezone(tz_br)
+                if target_br.weekday() in (5, 6):  # 5 = Sábado, 6 = Domingo
+                    days_to_monday = 7 - target_br.weekday()
+                    target_br_adjusted = target_br.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=days_to_monday)
+                    target_dt = target_br_adjusted.astimezone(timezone.utc)
+                    print(f"[schedule_redis_action] Data caía no fim de semana ({target_br}). fup_fds=False -> Ajustado para Segunda-feira: {target_dt} (BR: {target_br_adjusted}).")
 
             # Enfileirar tarefa no ARQ com _defer_until
             job = await redis_pool.enqueue_job(

@@ -96,9 +96,23 @@ async def generate_fup_decision(
     now_br = now_utc.astimezone(timezone(timedelta(hours=-3)))
     now_br_str = now_br.strftime("%Y-%m-%d %H:%M:%S")
 
+    # Mapeamento do dia da semana em português
+    dias_semana = {
+        0: "Segunda-feira",
+        1: "Terça-feira",
+        2: "Quarta-feira",
+        3: "Quinta-feira",
+        4: "Sexta-feira",
+        5: "Sábado",
+        6: "Domingo"
+    }
+    dia_semana_nome = dias_semana.get(now_br.weekday(), "")
+
     json_instructions = (
         f"\n\n### INSTRUÇÃO CRÍTICA DE FORMATO DE RESPOSTA:\n"
-        f"Data/hora atual de referência: {now_br_str} (Horário de Brasília).\n"
+        f"Data/hora atual de referência: {dia_semana_nome}, {now_br_str} (Horário de Brasília).\n"
+        f"ATENÇÃO AO CALENDÁRIO: Sábado e Domingo NÃO são dias úteis. "
+        f"Se for agendar para o próximo dia útil, lembre-se: após Sexta-feira, Sábado ou Domingo, o próximo dia útil é sempre SEGUNDA-FEIRA.\n"
         f"Tentativa atual da régua de follow-up: Tentativa {attempt}.\n"
         "Você é um agente de follow-up (FUP). Você deve responder ESTRITAMENTE em formato JSON válido.\n"
         "As opções válidas para o campo 'acao' são EXATAMENTE uma das opções abaixo:\n"

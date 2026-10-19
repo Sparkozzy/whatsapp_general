@@ -28,8 +28,19 @@
 
 ---
 
-### 5. `poetry.lock` Ignorado no `.gitignore` Causal de Cache Retido no Docker Build
-- **Erro Ocorrido:** A alteração da versão do Pydantic no `pyproject.toml` não era aplicada no Easypanel, mantendo o erro `ImportError` mesmo após o push.
-- **Causa-Raiz:** O arquivo `.gitignore` continha a regra `poetry.lock`. O Dockerfile copiava `COPY pyproject.toml poetry.lock* ./` e executava `RUN poetry install`. Como o `poetry.lock` não existia no repositório Git, o Docker reutilizava a camada de cache antiga com as dependências desatualizadas.
-- **Regra de Prevenção:** Nunca adicionar `poetry.lock` no `.gitignore` em projetos com deploy via Dockerfile. O `poetry.lock` deve estar sempre versionado para garantir reprodutibilidade exata dos builds.
+---
+
+### 6. Concorrência e Triplicidade de Follow-ups (FUP) e Agendamento em Fim de Semana
+- **Erro Ocorrido:** O mesmo lead recebeu 3 mensagens de FUP no WhatsApp no mesmo segundo (domingo às 09:30:01/09:30:02), geradas por 3 cadências concorrentes no Redis ARQ.
+- **Causa-Raiz:** 
+  1. A cada resposta da IA, uma nova cadência de FUP era criada sem cancelar ou invalidar jobs anteriores do mesmo telefone.
+  2. A checagem de inatividade verificava apenas se o lead enviou mensagem nos últimos 10 minutos (`diff_seconds < 600`), não validando se outra cadência já havia disparado para o lead.
+  3. O LLM determinou a Tentativa 3 para "09:30 do próximo dia útil" caindo em um domingo, alucinando que domingo era dia útil e ignorando a flag `fup_fds = False`.
+- **Solução Implementada:**
+  1. **Idempotência por Tentativa:** O worker inspeciona o `n8n_chat_histories` após a última mensagem do lead e aborta se aquela mesma tentativa (`Tentativa {attempt}`) já tiver sido executada neste ciclo.
+  2. **Trava Imediata Anti-Colisão:** Se um FUP foi gravado há menos de 3 minutos, aborta qualquer job concorrente que acorde no mesmo segundo.
+  3. **Sanitização de Dias Úteis:** Se `fup_fds = False` e a data cair em sábado ou domingo, o Python ajusta automaticamente para Segunda-feira às 09:30.
+  4. **Enriquecimento do Prompt:** O prompt do LLM passa a receber o nome do dia da semana (`Segunda-feira`, etc.) e instrução explícita de calendário.
+- **Regra de Prevenção:** Nunca confiar apenas no LLM para cálculo de calendário e dias úteis; toda regra de negócio crítica de data e concorrência deve ter barreira determinística em Python.
+
 
