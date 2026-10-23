@@ -135,6 +135,25 @@ async def handle_normalized_message(msg: NormalizedMessage):
     global redis_client, arq_pool
     key = f"whatsapp_buffer:{msg.client_id}:{msg.phone}"
     
+    # 0. Cancel any active/pending FUP jobs in Redis for this lead (lead interacted)
+    try:
+        clean_phone = "".join([c for c in msg.phone if c.isdigit()])
+        fup_cancel_ids = [
+            f"fup_check_{msg.client_id}_{clean_phone}",
+            f"fup_action_{msg.client_id}_{clean_phone}",
+            f"fup_cadence_{msg.client_id}_{clean_phone}_2",
+            f"fup_cadence_{msg.client_id}_{clean_phone}_3"
+        ]
+        active_job = await redis_client.get(f"fup_active_job:{msg.client_id}:{clean_phone}")
+        if active_job:
+            fup_cancel_ids.append(active_job.decode() if isinstance(active_job, bytes) else str(active_job))
+        for jid in set(fup_cancel_ids):
+            await redis_client.zrem("arq:queue", jid)
+            await redis_client.delete(f"arq:job:{jid}")
+        await redis_client.delete(f"fup_active_job:{msg.client_id}:{clean_phone}")
+    except Exception as cancel_err:
+        print(f"[FUP Cancel Error] Failed to purge active FUP in Redis for {msg.phone}: {cancel_err}")
+
     # 1. Add message text to Redis list
     await redis_client.rpush(key, msg.text)
     await redis_client.expire(key, 3600)  # 1 hour TTL

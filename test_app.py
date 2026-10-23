@@ -745,6 +745,45 @@ async def test_execute_scheduled_fup_chains_next_attempt(
         "cliente-teste",
         "+5548996027108",
         "mock-next-fup-exec-456",
-        2
+        2,
+        _job_id="fup_cadence_cliente-teste_5548996027108_2"
     )
+
+
+@pytest.mark.asyncio
+async def test_handle_normalized_message_cancels_pending_fup_in_redis():
+    """
+    Testa se o recebimento de mensagem pelo lead expurga imediatamente
+    todos os jobs pendentes de FUP no Redis sem onerar o Supabase.
+    """
+    from main import handle_normalized_message
+    from schemas import NormalizedMessage
+
+    mock_redis = AsyncMock()
+    mock_redis.get.return_value = b"custom_fup_job_id_123"
+    mock_redis.lrange.side_effect = [["msg1"], ["msg1"]]
+
+    mock_arq = AsyncMock()
+
+    with patch("main.redis_client", mock_redis), patch("main.arq_pool", mock_arq), patch("main.asyncio.sleep", AsyncMock()), patch("main.ClientDatabaseManager.get_client") as mock_db:
+        mock_supabase = MagicMock()
+        mock_supabase.table().insert().execute.return_value.data = [{"id": "mock-exec-id"}]
+        mock_db.return_value = mock_supabase
+
+        msg = NormalizedMessage(
+            client_id="cliente-teste",
+            phone="+5548996027108",
+            text="Oi",
+            type="text",
+            raw_payload={"mock": "data"}
+        )
+        await handle_normalized_message(msg)
+
+        # Verifica se o zrem foi chamado para expurgar as chaves de FUP
+        assert mock_redis.zrem.called
+        cancelled_calls = [c.args for c in mock_redis.zrem.call_args_list]
+        purged_keys = [args[1] for args in cancelled_calls if len(args) > 1]
+        assert "fup_check_cliente-teste_5548996027108" in purged_keys
+        assert "custom_fup_job_id_123" in purged_keys
+
 

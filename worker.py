@@ -371,38 +371,38 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
             
         await run_step_with_retry("whatsapp_flow_save_memory", execution_id, tenant_supabase, save_chat_memory, {"phone": phone})
 
-        # Trigger FUP flow safely scheduled after 10 minutes of inactivity
+        # Trigger FUP flow safely scheduled after 10 minutes of inactivity (Redis-First: zero Supabase write)
         try:
-            fup_exec_res = tenant_supabase.table("workflow_executions").insert({
-                "workflow_name": "fup_flow",
-                "status": "PENDING",
-                "input_data": {"client_id": client_id, "phone": phone, "trigger": "post_whatsapp_response", "delay_minutes": 10}
-            }).execute()
-            if fup_exec_res.data:
-                fup_execution_id = fup_exec_res.data[0]["id"]
-                redis_pool = ctx.get("redis")
-                fup_target_time = datetime.now(timezone.utc) + timedelta(minutes=10)
-                if redis_pool:
-                    await redis_pool.enqueue_job(
-                        "process_fup_request",
-                        client_id,
-                        phone,
-                        fup_execution_id,
-                        1,
-                        _defer_until=fup_target_time
+            redis_pool = ctx.get("redis")
+            clean_phone = "".join([c for c in phone if c.isdigit()])
+            fup_job_id = f"fup_check_{client_id}_{clean_phone}"
+            fup_target_time = datetime.now(timezone.utc) + timedelta(minutes=10)
+            if redis_pool:
+                # Remove agendamento anterior para garantir 1 único registro no Redis
+                await redis_pool.zrem("arq:queue", fup_job_id)
+                await redis_pool.delete(f"arq:job:{fup_job_id}")
+                await redis_pool.enqueue_job(
+                    "process_fup_request",
+                    client_id,
+                    phone,
+                    None,  # execution_id is None; created in Supabase only if 10min inactivity check passes
+                    1,
+                    _job_id=fup_job_id,
+                    _defer_until=fup_target_time
+                )
+                await redis_pool.set(f"fup_active_job:{client_id}:{clean_phone}", fup_job_id, ex=86400)
+            else:
+                asyncio.create_task(
+                    process_fup_request(
+                        ctx=ctx,
+                        client_id=client_id,
+                        phone=phone,
+                        execution_id=None,
+                        attempt=1
                     )
-                else:
-                    asyncio.create_task(
-                        process_fup_request(
-                            ctx=ctx,
-                            client_id=client_id,
-                            phone=phone,
-                            execution_id=fup_execution_id,
-                            attempt=1
-                        )
-                    )
+                )
         except Exception as fup_err:
-            print(f"[FUP Trigger Warning] Failed to schedule FUP process: {fup_err}")
+            print(f"[FUP Trigger Warning] Failed to schedule FUP in Redis: {fup_err}")
 
         # Finish master as SUCCESS
         tenant_supabase.table("workflow_executions").update({
@@ -448,7 +448,7 @@ async def execute_scheduled_fup_action(
     # b) Anti-duplicidade/Cooldown: Se já houve outro FUP disparado nos últimos 30 minutos, cancela.
     # c) Limite de tentativas: Se o lead já recebeu >= quantidade_fup_whats no ciclo atual, cancela.
     try:
-        res_lead = tenant_supabase.table("Leads_Mindflow").select("data ultima msgm").eq("Número", phone).limit(1).execute()
+        res_lead = tenant_supabase.table("Leads_Mindflow").select('"data ultima msgm"').eq("Número", phone).limit(1).execute()
         lead_last_dt = None
         if res_lead.data and res_lead.data[0].get("data ultima msgm"):
             lead_last_dt = datetime.fromisoformat(res_lead.data[0]["data ultima msgm"])
@@ -715,14 +715,20 @@ async def execute_scheduled_fup_action(
 
                     if next_exec.data:
                         next_execution_id = next_exec.data[0]["id"]
+                        clean_phone = "".join([c for c in phone if c.isdigit()])
+                        next_job_id = f"fup_cadence_{client_id}_{clean_phone}_{next_attempt}"
+                        await redis_pool.zrem("arq:queue", next_job_id)
+                        await redis_pool.delete(f"arq:job:{next_job_id}")
                         await redis_pool.enqueue_job(
                             "process_fup_request",
                             client_id,
                             phone,
                             next_execution_id,
-                            next_attempt
+                            next_attempt,
+                            _job_id=next_job_id
                         )
-                        print(f"[execute_scheduled_fup_action] Próxima etapa #{next_attempt} enfileirada no ARQ (ID: {next_execution_id}).")
+                        await redis_pool.set(f"fup_active_job:{client_id}:{clean_phone}", next_job_id, ex=86400)
+                        print(f"[execute_scheduled_fup_action] Próxima etapa #{next_attempt} enfileirada no ARQ (Job: {next_job_id}, Exec: {next_execution_id}).")
                 except Exception as chain_err:
                     print(f"[execute_scheduled_fup_action] Erro ao encadear próxima etapa #{next_attempt} do FUP: {chain_err}")
 
@@ -731,7 +737,7 @@ async def process_fup_request(
     ctx: Dict[str, Any],
     client_id: str,
     phone: str,
-    execution_id: str,
+    execution_id: Optional[str] = None,
     attempt: int = 1,
     custom_context: Optional[str] = None
 ):
@@ -746,12 +752,41 @@ async def process_fup_request(
     tenant_supabase = ClientDatabaseManager.get_client(client_id)
     openai_client = ctx["openai"]
     redis_pool = ctx.get("redis")  # ARQ Pool injetado no startup
+    config = ClientDatabaseManager.get_client_config(client_id)
 
-    # Atualiza status mestre para RUNNING
-    tenant_supabase.table("workflow_executions").update({
-        "status": "RUNNING",
-        "started_at": datetime.now(timezone.utc).isoformat()
-    }).eq("id", execution_id).execute()
+    # 0. Verificação prévia: Se FUP desabilitado para o cliente, sai imediatamente (zero Supabase write)
+    if config.get("fup") is False:
+        print(f"[process_fup_request] FUP desabilitado para cliente {client_id}. Abortando sem criar execução.")
+        return
+
+    # 0.1 Verificação de inatividade prévia: Se o lead interagiu há menos de 10 min, aborta sem poluir o Supabase
+    if not custom_context:
+        try:
+            res_lead_fast = tenant_supabase.table("Leads_Mindflow").select('"data ultima msgm"').eq("Número", phone).limit(1).execute()
+            if res_lead_fast.data and res_lead_fast.data[0].get("data ultima msgm"):
+                last_dt_fast = datetime.fromisoformat(res_lead_fast.data[0]["data ultima msgm"])
+                if last_dt_fast.tzinfo is None:
+                    last_dt_fast = last_dt_fast.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - last_dt_fast).total_seconds() < 600:
+                    print(f"[process_fup_request] Lead {phone} interagiu há menos de 10 minutos. Abortando silenciosamente no Redis (Zero Supabase write).")
+                    return
+        except Exception as fast_check_err:
+            print(f"[process_fup_request] Aviso checagem rápida: {fast_check_err}")
+
+    # Cria ou atualiza o registro mestre de execução no Supabase APENAS SE passou na validação
+    if not execution_id:
+        res_exec = tenant_supabase.table("workflow_executions").insert({
+            "workflow_name": "fup_flow",
+            "status": "RUNNING",
+            "input_data": {"client_id": client_id, "phone": phone, "trigger": "inactivity_timeout_10min", "attempt": attempt},
+            "started_at": datetime.now(timezone.utc).isoformat()
+        }).execute()
+        execution_id = res_exec.data[0]["id"]
+    else:
+        tenant_supabase.table("workflow_executions").update({
+            "status": "RUNNING",
+            "started_at": datetime.now(timezone.utc).isoformat()
+        }).eq("id", execution_id).execute()
 
     try:
         # 1. Leitura de config no Master e Prompt no Supabase
@@ -1057,7 +1092,14 @@ async def process_fup_request(
                     target_dt = target_br_adjusted.astimezone(timezone.utc)
                     print(f"[schedule_redis_action] Data caía no fim de semana ({target_br}). fup_fds=False -> Ajustado para Segunda-feira: {target_dt} (BR: {target_br_adjusted}).")
 
-            # Enfileirar tarefa no ARQ com _defer_until
+            clean_phone = "".join([c for c in phone if c.isdigit()])
+            action_job_id = f"fup_action_{client_id}_{clean_phone}"
+
+            # Remove qualquer ação de FUP anterior ainda pendente no Redis para este lead
+            await redis_pool.zrem("arq:queue", action_job_id)
+            await redis_pool.delete(f"arq:job:{action_job_id}")
+
+            # Enfileirar tarefa no ARQ com _defer_until e _job_id determinístico
             job = await redis_pool.enqueue_job(
                 "execute_scheduled_fup_action",
                 client_id,
@@ -1066,10 +1108,11 @@ async def process_fup_request(
                 fup_decision.get("conteudo") or "",
                 execution_id,
                 attempt,
+                _job_id=action_job_id,
                 _defer_until=target_dt
             )
-            
-            job_id = job.job_id if job else "queued"
+            job_id = action_job_id
+            await redis_pool.set(f"fup_active_job:{client_id}:{clean_phone}", action_job_id, ex=86400)
             return {
                 "status": "scheduled",
                 "job_id": job_id,
