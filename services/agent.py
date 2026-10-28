@@ -345,6 +345,8 @@ async def generate_llm_response_with_mcp(
 
     # Track executed tools for EDW observability
     executed_tool_calls: List[Dict[str, Any]] = []
+    # Track raw intermediate messages (assistant tool calls and tool responses) for memory persistence
+    raw_intermediate_steps: List[Dict[str, Any]] = []
 
     # Prepare SSE headers
     headers = {}
@@ -439,7 +441,9 @@ async def generate_llm_response_with_mcp(
                 msg = response.choices[0].message
 
                 if msg.tool_calls:
-                    messages.append(msg.model_dump(exclude_none=True))
+                    assistant_msg_dict = msg.model_dump(exclude_none=True)
+                    messages.append(assistant_msg_dict)
+                    raw_intermediate_steps.append(assistant_msg_dict)
                     
                     for tool_call in msg.tool_calls:
                         tool_name = tool_call.function.name
@@ -521,17 +525,22 @@ async def generate_llm_response_with_mcp(
                                 "error": str(tool_err)
                             })
 
-                        messages.append({
+                        tool_msg_dict = {
                             "role": "tool",
                             "tool_call_id": tool_call.id,
+                            "name": tool_name,
                             "content": result_text
-                        })
+                        }
+                        messages.append(tool_msg_dict)
+                        raw_intermediate_steps.append(tool_msg_dict)
                 else:
                     content = msg.content
                     try:
                         res_json = json.loads(content)
                         if executed_tool_calls:
                             res_json["tool_calls"] = executed_tool_calls
+                        if raw_intermediate_steps:
+                            res_json["intermediate_steps"] = raw_intermediate_steps
                         return res_json
                     except json.JSONDecodeError:
                         res_json = {
@@ -540,6 +549,8 @@ async def generate_llm_response_with_mcp(
                         }
                         if executed_tool_calls:
                             res_json["tool_calls"] = executed_tool_calls
+                        if raw_intermediate_steps:
+                            res_json["intermediate_steps"] = raw_intermediate_steps
                         return res_json
     except Exception as e:
         print(f"Error in MCP loop: {e}. Falling back to normal response.")

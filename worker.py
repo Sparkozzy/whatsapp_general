@@ -28,6 +28,116 @@ def _clean_null_bytes(val: Any) -> Any:
         return [_clean_null_bytes(item) for item in val]
     return val
 
+
+def parse_chat_history_rows(raw_rows: list) -> list:
+    """
+    Parses rows from n8n_chat_histories into OpenAI-compatible message list,
+    preserving human, ai (with tool_calls), and tool response messages.
+    """
+    history = []
+    for row in raw_rows:
+        msg = row.get("message") or {}
+        msg_type = msg.get("type")
+        content = msg.get("content", "")
+        
+        if isinstance(content, dict):
+            content = content.get("output") or content.get("text") or str(content)
+        elif not isinstance(content, str):
+            content = str(content)
+
+        if msg_type == "human":
+            history.append({"role": "user", "content": content})
+        elif msg_type == "ai":
+            item = {"role": "assistant", "content": content}
+            tool_calls = msg.get("additional_kwargs", {}).get("tool_calls")
+            if tool_calls:
+                item["tool_calls"] = tool_calls
+            history.append(item)
+        elif msg_type == "tool":
+            history.append({
+                "role": "tool",
+                "tool_call_id": msg.get("tool_call_id") or msg.get("additional_kwargs", {}).get("tool_call_id") or "",
+                "name": msg.get("name") or "",
+                "content": content
+            })
+        else:
+            role = "user" if msg_type == "human" else "assistant"
+            history.append({"role": role, "content": content})
+    return history
+
+
+def prepare_chat_memory_records(
+    phone: str,
+    user_text: str,
+    output_text: str,
+    intermediate_steps: list = None
+) -> list:
+    """
+    Builds the list of records to insert into n8n_chat_histories in strict chronological order:
+    1. human message
+    2. intermediate assistant tool_calls & tool responses
+    3. final ai response message
+    """
+    records = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # 1. Human message
+    records.append({
+        "session_id": phone,
+        "message": {
+            "type": "human",
+            "content": user_text,
+            "additional_kwargs": {},
+            "response_metadata": {}
+        },
+        "created_at": now_iso
+    })
+
+    # 2. Intermediate tool steps
+    if intermediate_steps:
+        for step in intermediate_steps:
+            role = step.get("role")
+            if role == "assistant" and step.get("tool_calls"):
+                records.append({
+                    "session_id": phone,
+                    "message": {
+                        "type": "ai",
+                        "content": step.get("content") or "",
+                        "additional_kwargs": {
+                            "tool_calls": step.get("tool_calls")
+                        },
+                        "response_metadata": {}
+                    },
+                    "created_at": now_iso
+                })
+            elif role == "tool":
+                records.append({
+                    "session_id": phone,
+                    "message": {
+                        "type": "tool",
+                        "name": step.get("name") or "",
+                        "tool_call_id": step.get("tool_call_id") or "",
+                        "content": step.get("content") or "",
+                        "additional_kwargs": {},
+                        "response_metadata": {}
+                    },
+                    "created_at": now_iso
+                })
+
+    # 3. Final AI text response
+    records.append({
+        "session_id": phone,
+        "message": {
+            "type": "ai",
+            "content": output_text,
+            "additional_kwargs": {},
+            "response_metadata": {}
+        },
+        "created_at": now_iso
+    })
+
+    return records
+
 # EDW Step execution helper with retry and tracking
 async def run_step_with_retry(
     step_name: str,
@@ -223,21 +333,11 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
                     .select("message, id")\
                     .eq("session_id", phone)\
                     .order("id", desc=True)\
-                    .limit(10)\
+                    .limit(20)\
                     .execute()
                 # Reverse to get chronological order
-                raw_history = list(reversed(res.data))
-                history = []
-                for row in raw_history:
-                    msg = row.get("message") or {}
-                    msg_type = msg.get("type")
-                    content = msg.get("content", "")
-                    if isinstance(content, dict):
-                        content = content.get("output") or content.get("text") or str(content)
-                    elif not isinstance(content, str):
-                        content = str(content)
-                    role = "user" if msg_type == "human" else "assistant"
-                    history.append({"role": role, "content": content})
+                raw_history = list(reversed(res.data or []))
+                history = parse_chat_history_rows(raw_history)
             except Exception:
                 # If table does not exist or fails, return empty list
                 history = []
@@ -340,34 +440,21 @@ async def process_whatsapp_response(ctx: Dict[str, Any], client_id: str, phone: 
                 
             await run_step_with_retry("whatsapp_flow_send_messages", execution_id, tenant_supabase, send_text_messages, {"phone": phone, "messages": messages_to_send})
 
+        intermediate_steps = response_data.get("intermediate_steps") or []
+
         # 8. Save Memory
         async def save_chat_memory():
             try:
-                # Add user message
-                tenant_supabase.table("n8n_chat_histories").insert({
-                    "session_id": phone,
-                    "message": {
-                        "type": "human",
-                        "content": aggregated_text,
-                        "additional_kwargs": {},
-                        "response_metadata": {}
-                    },
-                    "created_at": datetime.now(timezone.utc).isoformat()
-                }).execute()
-                # Add assistant response
-                tenant_supabase.table("n8n_chat_histories").insert({
-                    "session_id": phone,
-                    "message": {
-                        "type": "ai",
-                        "content": output_text,
-                        "additional_kwargs": {},
-                        "response_metadata": {}
-                    },
-                    "created_at": datetime.now(timezone.utc).isoformat()
-                }).execute()
+                records = prepare_chat_memory_records(
+                    phone=phone,
+                    user_text=aggregated_text,
+                    output_text=output_text,
+                    intermediate_steps=intermediate_steps
+                )
+                tenant_supabase.table("n8n_chat_histories").insert(records).execute()
             except Exception as e:
                 return {"status": "failed_saving_memory", "error": str(e)}
-            return {"status": "saved"}
+            return {"status": "saved", "records_count": len(records)}
             
         await run_step_with_retry("whatsapp_flow_save_memory", execution_id, tenant_supabase, save_chat_memory, {"phone": phone})
 
