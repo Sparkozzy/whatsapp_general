@@ -4,8 +4,39 @@ from typing import Dict, Any
 
 async def send_text(client_config: Dict[str, Any], to_phone: str, message: str) -> Dict[str, Any]:
     """
-    Sends a text message using Z-API.
+    Sends a text message using Helena (WTS) or Z-API depending on whatsapp_provider.
     """
+    provider = str(client_config.get("whatsapp_provider") or "zapi").strip().lower()
+
+    if provider == "helena":
+        helena_token = client_config.get("helena_api_token")
+        if not helena_token:
+            raise ValueError("Missing helena_api_token in client configuration.")
+        clean_token = helena_token.strip()
+        if not clean_token.lower().startswith("bearer "):
+            clean_token = f"Bearer {clean_token}"
+
+        headers = {
+            "Authorization": clean_token,
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        clean_to = "".join([c for c in to_phone if c.isdigit()])
+        payload = {
+            "to": clean_to,
+            "body": {
+                "text": message
+            }
+        }
+        from_phone = client_config.get("whatsapp_phone_number")
+        if from_phone and str(from_phone).strip():
+            payload["from"] = str(from_phone).strip()
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post("https://api.wts.chat/chat/v1/message/send", json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()
+
     instance_id = client_config.get("zapi_instance_id")
     client_token = client_config.get("zapi_client_token")
     security_token = client_config.get("zapi_security_token")
