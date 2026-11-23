@@ -311,8 +311,8 @@ async def crm_webhook(
     _ = Depends(verify_mindflow_token)
 ):
     content = payload.content
-    if content.direction != "FROM_HUB":
-        return {"status": "ignored", "reason": "Not an inbound message (direction is not FROM_HUB)."}
+    if content.direction != "FROM_HUB" or not content.details:
+        return {"status": "ignored", "reason": "Not an inbound message (direction is not FROM_HUB or missing details)."}
 
     content_type = content.type.upper()
     phone = sanitize_phone(content.details.sender_from)

@@ -44,8 +44,8 @@ class CrmContent(BaseModel):
     
     type: str = "TEXT"  # TEXT, AUDIO, IMAGE, DOCUMENT, PDF, etc.
     text: Optional[str] = None
-    direction: str  # FROM_HUB, TO_HUB
-    details: CrmDetails
+    direction: Optional[str] = None  # FROM_HUB, TO_HUB
+    details: Optional[CrmDetails] = None
 
 class CrmWebhookPayload(BaseModel):
     eventType: str
