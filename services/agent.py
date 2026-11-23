@@ -8,6 +8,61 @@ from pypdf import PdfReader
 from mcp.client.sse import sse_client
 from mcp.client.session import ClientSession
 
+def sanitize_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Validates and cleans message history for OpenAI API:
+    1. Ensures messages with role 'tool' are preceded by an assistant message with matching tool_calls.
+    2. Ensures assistant messages with tool_calls are followed by their corresponding tool responses.
+    3. Removes orphaned tool messages or assistant tool_calls that would cause 400 Bad Request.
+    """
+    cleaned: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        role = msg.get("role")
+        
+        # If it is a tool message without preceding assistant tool_calls in cleaned, skip it
+        if role == "tool":
+            tool_id = msg.get("tool_call_id")
+            has_matching_call = False
+            for prev in reversed(cleaned):
+                if prev.get("role") == "assistant":
+                    prev_calls = [tc.get("id") for tc in (prev.get("tool_calls") or [])]
+                    if tool_id in prev_calls:
+                        has_matching_call = True
+                    break
+            if has_matching_call:
+                cleaned.append(msg)
+            i += 1
+            continue
+
+        # If it is an assistant message with tool_calls
+        if role == "assistant" and msg.get("tool_calls"):
+            expected_ids = {tc.get("id") for tc in msg.get("tool_calls") if tc.get("id")}
+            j = i + 1
+            tool_responses = []
+            found_ids = set()
+            while j < len(messages) and messages[j].get("role") == "tool":
+                tid = messages[j].get("tool_call_id")
+                if tid in expected_ids:
+                    tool_responses.append(messages[j])
+                    found_ids.add(tid)
+                j += 1
+            
+            if expected_ids and expected_ids == found_ids:
+                cleaned.append(msg)
+                cleaned.extend(tool_responses)
+                i = j
+                continue
+            else:
+                # Discard orphaned assistant tool call
+                i += 1
+                continue
+
+        cleaned.append(msg)
+        i += 1
+
+    return cleaned
 
 
 async def generate_llm_response(
@@ -37,9 +92,17 @@ async def generate_llm_response(
         {"role": "system", "content": system_prompt + json_instructions}
     ]
     
-    # Append conversation history (limited to last 10 turns)
-    for msg in chat_history[-10:]:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+    # Append conversation history (preserving valid tool structure and avoiding orphaned tool calls)
+    history_to_append = sanitize_openai_messages(chat_history[-10:])
+    for msg in history_to_append:
+        m = {"role": msg["role"], "content": msg["content"]}
+        if "tool_calls" in msg:
+            m["tool_calls"] = msg["tool_calls"]
+        if "tool_call_id" in msg:
+            m["tool_call_id"] = msg["tool_call_id"]
+        if "name" in msg:
+            m["name"] = msg["name"]
+        messages.append(m)
         
     messages.append({"role": "user", "content": user_message})
 
@@ -338,8 +401,17 @@ async def generate_llm_response_with_mcp(
     
     messages = [{"role": "system", "content": system_prompt + json_instructions}]
     
-    for msg in chat_history[-10:]:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+    # Append conversation history (preserving valid tool structure and avoiding orphaned tool calls)
+    history_to_append = sanitize_openai_messages(chat_history[-10:])
+    for msg in history_to_append:
+        m = {"role": msg["role"], "content": msg["content"]}
+        if "tool_calls" in msg:
+            m["tool_calls"] = msg["tool_calls"]
+        if "tool_call_id" in msg:
+            m["tool_call_id"] = msg["tool_call_id"]
+        if "name" in msg:
+            m["name"] = msg["name"]
+        messages.append(m)
         
     messages.append({"role": "user", "content": user_message})
 
